@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.py[cod]
+*$py.class
+build/
+dist/
+wheels/
+*.egg-info
+
+# Entornos virtuales de Python
+.venv/
+venv/
+env/
+*.pyc
+
+# Variables de entorno y secretos (¡CRÍTICO!)
+.env
+
+# Archivos del sistema operativo (Mac)
+.DS_Store
+
+# Archivos de la base de datos local (si los añades en el futuro)
+*.db
+*.sqlite3
+
+# Archivos temporales de descarga (para que no subas los SRT de prueba)
+*.srt
+*.mp4
