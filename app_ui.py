@@ -54,6 +54,13 @@ section[data-testid="stSidebar"]{
 button[kind="headerNoPadding"]{
   display:none!important;
 }
+/* Cabecera reservada vacía del sidebar (Streamlit 1.56) — quitar hueco */
+[data-testid="stSidebarHeader"]{
+  display:none!important;
+  height:0!important;
+  margin:0!important;
+  padding:0!important;
+}
 /* El contenido principal no debe ocultarse detrás */
 [data-testid="stAppViewContainer"] > .main{
   margin-left:0!important;
@@ -128,19 +135,46 @@ header{background:transparent!important;}
   border-right:1px solid var(--line)!important;
 }
 [data-testid="stSidebar"]>div:first-child,
-[data-testid="stSidebarContent"],
+[data-testid="stSidebarContent"]{
+  padding:0!important;
+  background:var(--surface)!important;
+  height:100vh!important;
+}
+/* el contenedor de usuario es flex-column a pantalla completa
+   para poder empujar el .sb-foot al fondo con margin-top:auto */
 [data-testid="stSidebarUserContent"]{
-  padding:20px 14px 16px!important;
+  display:flex!important;
+  flex-direction:column!important;
+  min-height:calc(100vh - 32px)!important;
+  padding:24px 16px 22px!important;
   background:var(--surface)!important;
 }
 /* Los botones de colapso están ocultos al inicio del archivo (sidebar fija) */
 
 /* brand */
-.sb-brand{display:flex;gap:10px;align-items:center;padding:2px 6px 16px;border-bottom:1px solid var(--line-2);margin:4px 2px 12px;}
-.sb-logo{width:30px;height:30px;border-radius:8px;background:var(--primary);color:var(--primary-ink);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;box-shadow:var(--shadow-1);}
+.sb-brand{
+  display:flex;gap:12px;align-items:center;
+  padding:4px 4px 22px;
+  border-bottom:1px solid var(--line-2);
+  margin:4px 0 18px;
+}
+.sb-logo{
+  width:40px;height:40px;border-radius:11px;
+  background:var(--primary);color:var(--primary-ink);
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;font-weight:700;letter-spacing:-.5px;
+  flex-shrink:0;box-shadow:var(--shadow-1);
+}
 .sb-text{min-width:0;}
-.sb-name{font-size:14px;font-weight:600;letter-spacing:-.3px;color:var(--text);line-height:1.2;}
-.sb-tag{font-size:9.5px;color:var(--text-4);margin-top:2px;text-transform:uppercase;letter-spacing:.08em;font-weight:500;white-space:nowrap;}
+.sb-name{
+  font-size:25px;font-weight:700;letter-spacing:-.4px;
+  color:var(--text);line-height:1.2;
+}
+.sb-tag{
+  font-size:12px;color:var(--text-4);margin-top:4px;
+  text-transform:uppercase;letter-spacing:.1em;
+  font-weight:600;white-space:nowrap;
+}
 
 /* nav items — impedir word-wrap feo */
 [data-testid="stSidebar"] .stRadio>div>label{white-space:nowrap!important;}
@@ -160,8 +194,26 @@ header{background:transparent!important;}
 [data-testid="stSidebar"] .stRadio input[type="radio"]{display:none!important;}
 [data-testid="stSidebar"] .stRadio>div>label>div:first-child{display:none!important;}
 
-.sb-foot{border-top:1px solid var(--line-2);padding:12px 6px 0;margin-top:12px;font-size:11px;color:var(--text-4);line-height:1.55;}
-.sb-foot .dim{color:var(--text-5);}
+/* Footer pegado al fondo del sidebar.
+   Streamlit envuelve cada elemento en su propio contenedor, por lo que
+   margin-top:auto NO funciona (el .sb-foot no es hijo directo del flex).
+   Solución robusta: sacar el contenedor entero del flujo con position:absolute
+   anclado al sidebar (que ya tiene position:relative). */
+[data-testid="stSidebarUserContent"] [data-testid="stElementContainer"]:has(.sb-foot),
+[data-testid="stSidebarUserContent"] div[data-testid="element-container"]:has(.sb-foot){
+  position:absolute!important;
+  bottom:22px!important;
+  left:16px!important;
+  right:16px!important;
+  margin:0!important;
+}
+.sb-foot{
+  padding:16px 6px 0;
+  border-top:1px solid var(--line-2);
+  font-size:11.5px;color:var(--text-4);line-height:1.65;
+  background:var(--surface);
+}
+.sb-foot .dim{color:var(--text-5);margin-top:3px;}
 
 /* ── PAGE HEADER ───────────────────────── */
 .ph{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:24px;padding-bottom:18px;border-bottom:1px solid var(--line-2);gap:16px;}
@@ -465,7 +517,7 @@ def render_workspace():
         placeholder='Ej: "Breaking Bad" — serie dramática. Walter White, protagonista. No adaptar nombres propios.',
         label_visibility="collapsed",
     )
-    st.markdown('<div class="hint">Este texto se inyecta como contexto en el LLM para mejorar la coherencia narrativa.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hint">Este texto se usara como contexto para mejorar la coherencia narrativa.</div>', unsafe_allow_html=True)
 
     # Archivos
     section_label("Archivos")
