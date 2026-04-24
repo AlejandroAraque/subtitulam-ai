@@ -429,32 +429,38 @@ def empty_state(icon: str, title: str, sub: str):
 # ═══════════════════════════════════════════════════════════════════════════
 def process_translation(srt_file, context: str, target_lang: str, cpl_limit: int) -> dict:
     """
-    Envía el .srt al backend y devuelve {bytes, filename, metrics}.
-
-    TODO — conectar a tu API real:
-        response = requests.post(
-            f"{BACKEND_URL}/translate",
-            files={"file": (srt_file.name, srt_file.getvalue(), "text/plain")},
-            data={"context": context, "target": target_lang, "cpl": cpl_limit},
-            timeout=300,
-        )
-        response.raise_for_status()
-        return {
-            "bytes":    response.content,
-            "filename": f"{target_lang}_{srt_file.name}",
-            "metrics":  response.headers.get("X-Metrics", {}),
-        }
+    Envía el .srt al backend con contexto, idioma destino y límite CPL.
+    Devuelve {bytes, filename, metrics} con métricas reales calculadas sobre
+    el SRT traducido (líneas, CPL compliance, idiomas).
     """
     response = requests.post(
         f"{BACKEND_URL}/translate",
         files={"file": (srt_file.name, srt_file.getvalue(), "text/plain")},
+        data={
+            "context":     context,
+            "target_lang": target_lang,
+            "cpl":         cpl_limit,
+        },
         timeout=300,
     )
     response.raise_for_status()
+
+    # ── Métricas reales calculadas sobre el SRT devuelto ────────────────────
+    translated_text = response.content.decode("utf-8", errors="ignore")
+    lines = [ln for ln in translated_text.splitlines()
+             if ln.strip() and "-->" not in ln and not ln.strip().isdigit()]
+    n_lines = len(lines)
+    n_over_cpl = sum(1 for ln in lines if len(ln) > cpl_limit)
+    cpl_rate = f"{(n_lines - n_over_cpl) / max(1, n_lines) * 100:.1f}%"
+
     return {
         "bytes":    response.content,
         "filename": f"{target_lang}_{srt_file.name}",
-        "metrics":  {"cpl_rate": "98%", "lines": "1.284", "langs": f"EN → {target_lang.upper()}"},
+        "metrics":  {
+            "cpl_rate": cpl_rate,
+            "lines":    str(n_lines),
+            "langs":    f"EN → {target_lang.upper()}",
+        },
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
