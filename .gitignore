@@ -27,3 +27,10 @@ env/
 # Archivos temporales de descarga (para que no subas los SRT de prueba)
 *.srt
 *.mp4
+
+# Excepciones: artefactos de runs canónicos (baseline, comparativas) sí se versionan
+!data/baseline_run/*.srt
+!data/baseline_run/*.mp4
+# Excepción: el SRT de prueba canónico se versiona como referencia del corpus
+!data/test_sample_en.srt
+!data/testset/**/*.srt

@@ -1,0 +1,32 @@
+{
+  "version": "v1.5-baseline",
+  "git_commit": "361814b",
+  "model": "gpt-4o",
+  "temperature": 0.3,
+  "max_tokens": 800,
+  "chunk_size": 5,
+  "configuration": {
+    "context": "",
+    "target_lang": "es",
+    "cpl_limit": 42,
+    "glossary": "empty (not used in v1.5 prompt)",
+    "rag": "disabled (v2 feature)"
+  },
+  "input": {
+    "file": "test_sample_en.srt",
+    "n_cues": 20,
+    "source_lang": "en"
+  },
+  "execution": {
+    "started_at": "2026-04-25 15:07:16.833434",
+    "elapsed_s": 9.767,
+    "status": "completed"
+  },
+  "metrics": {
+    "cpl_compliance_pct": 100.0,
+    "tokens_prompt": 1787,
+    "tokens_completion": 305,
+    "tokens_total": 2092,
+    "estimated_cost_usd": 0.00752
+  }
+}
