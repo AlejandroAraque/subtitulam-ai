@@ -19,12 +19,71 @@ import streamlit as st
 
 BACKEND_URL = "http://localhost:8000"
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# API HELPERS — capa fina sobre requests para hablar con el backend.
+# Todas devuelven valores "seguros" cuando el backend no responde, evitando
+# que la UI explote si uvicorn está caído.
+# ═══════════════════════════════════════════════════════════════════════════
+def api_get_glossary() -> list[dict]:
+    """Lista los términos del glosario. [] si el backend no responde."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/glossary", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException:
+        return []
+
+
+def api_post_glossary(source: str, target: str, category: str, note: str) -> Optional[dict]:
+    """Crea un término. Devuelve el dict creado o None si falla."""
+    try:
+        r = requests.post(
+            f"{BACKEND_URL}/glossary",
+            json={"source": source, "target": target, "category": category, "note": note},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        st.toast(f"No se pudo guardar el término: {e}", icon="⚠")
+        return None
+
+
+def api_delete_glossary(term_id: int) -> bool:
+    """Borra un término por id. True si se borró, False si no existía o falló."""
+    try:
+        r = requests.delete(f"{BACKEND_URL}/glossary/{term_id}", timeout=10)
+        return r.status_code == 204
+    except requests.exceptions.RequestException:
+        return False
+
+
+def api_get_jobs() -> list[dict]:
+    """Lista los jobs (historial) más recientes primero."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/jobs", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.RequestException:
+        return []
+
+
+def api_delete_job(job_id: int) -> bool:
+    """Borra un job y, en cascada, sus translations."""
+    try:
+        r = requests.delete(f"{BACKEND_URL}/jobs/{job_id}", timeout=10)
+        return r.status_code == 204
+    except requests.exceptions.RequestException:
+        return False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="Subtitulam",
-    page_icon="◆",
+    page_icon="✅",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -589,17 +648,8 @@ def render_workspace():
             st.session_state.ws_result_bytes = result["bytes"]
             st.session_state.ws_result_name  = result["filename"]
             st.session_state.ws_metrics      = result["metrics"]
-            st.session_state.history.insert(0, {
-                "ID":       trn_id,
-                "Cliente":  "CLI-007",
-                "Archivo":  srt_file.name,
-                "Idiomas":  result["metrics"].get("langs", f"EN → {st.session_state.target_lang.upper()}"),
-                "CPL":      st.session_state.cpl_limit,
-                "Líneas":   1284,
-                "Duración": "1m 42s",
-                "Fecha":    datetime.now().strftime("%d %b %Y, %H:%M"),
-                "Estado":   "ok",
-            })
+            # El backend ya persistió el job y sus translations en SQLite
+            # vía save_completed_job() — no hace falta tocar el historial aquí.
             st.rerun()
         except requests.exceptions.ConnectionError:
             placeholder.empty()
@@ -647,6 +697,9 @@ def render_glosario():
         "Términos y traducciones fijas que la IA aplicará como contexto vectorial.",
     )
 
+    # ── Lectura desde la API en cada render (fuente de verdad: SQLite) ──
+    glossary = api_get_glossary()
+
     col_form, col_table = st.columns([1, 1.5], gap="large")
 
     with col_form:
@@ -659,44 +712,55 @@ def render_glosario():
 
             if st.form_submit_button("+ Añadir regla", use_container_width=True):
                 if term.strip() and trans.strip():
-                    st.session_state.glossary.insert(0, {
-                        "Término": term.strip(),
-                        "Traducción": trans.strip(),
-                        "Contexto": ctx.strip() or "—",
-                        "Etiqueta": tag,
-                    })
-                    # TODO — POST a backend:
-                    # requests.post(f"{BACKEND_URL}/glossary", json={...})
-                    st.rerun()
+                    created = api_post_glossary(
+                        source=term.strip(),
+                        target=trans.strip(),
+                        category=tag,
+                        note=ctx.strip(),
+                    )
+                    if created is not None:
+                        st.toast(f'Añadido: {created["source"]} → {created["target"]}', icon="✅")
+                        st.rerun()
                 else:
                     st.error("Término y Traducción son obligatorios.")
 
     with col_table:
-        n = len(st.session_state.glossary)
+        n = len(glossary)
         section_label("Reglas activas", right=f'<span class="mono" style="color:var(--text-4);font-size:12px;">{n} reglas</span>')
         if n == 0:
             empty_state("📖", "Sin reglas todavía",
                         "Añade términos desde el formulario. La IA los aplicará como contexto vectorial en cada traducción.")
         else:
-            df = pd.DataFrame(st.session_state.glossary)
+            # Renombrar campos al render para mantener la UI en español.
+            df = pd.DataFrame(glossary).rename(columns={
+                "source":   "Término",
+                "target":   "Traducción",
+                "note":     "Contexto",
+                "category": "Etiqueta",
+            })
+            df = df[["Término", "Traducción", "Contexto", "Etiqueta"]]
             st.dataframe(df, hide_index=True, use_container_width=True,
                          height=min(58 + n * 38, 460))
             st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
             if st.button("Limpiar glosario", type="secondary", use_container_width=True):
-                st.session_state.glossary = []
+                for term in glossary:
+                    api_delete_glossary(term["id"])
+                st.toast("Glosario vaciado.", icon="🗑")
                 st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · HISTORIAL
 # ═══════════════════════════════════════════════════════════════════════════
 def render_historial():
-    n = len(st.session_state.history)
-    n_ok  = sum(1 for h in st.session_state.history if h.get("Estado") == "ok")
-    n_run = sum(1 for h in st.session_state.history if h.get("Estado") == "run")
+    # ── Lectura desde la API en cada render (fuente de verdad: SQLite) ──
+    jobs = api_get_jobs()
+    n     = len(jobs)
+    n_ok  = sum(1 for j in jobs if j.get("status") == "completed")
+    n_err = sum(1 for j in jobs if j.get("status") == "failed")
 
     page_header(
         "Historial de Proyectos",
-        f"{n} proyectos · {n_ok} completados · {n_run} en curso"
+        f"{n} proyectos · {n_ok} completados · {n_err} con error"
         if n else "Las traducciones completadas aparecerán aquí automáticamente.",
     )
 
@@ -705,32 +769,59 @@ def render_historial():
                     "Las traducciones completadas aparecerán aquí automáticamente.")
         return
 
-    df = pd.DataFrame(st.session_state.history)
-    # Renombrar 'Estado' a texto legible para el dataframe
-    if "Estado" in df.columns:
-        df["Estado"] = df["Estado"].map({
-            "ok": "✓ Completado", "run": "● En curso",
-            "err": "✕ Error", "warn": "! Revisión", "queued": "◦ En cola",
-        }).fillna(df["Estado"])
+    # ── Mapeo de los campos del API a las columnas que mostramos ────────
+    rows = []
+    for j in jobs:
+        # Fecha legible
+        try:
+            dt = datetime.fromisoformat(j["started_at"])
+            fecha = dt.strftime("%d %b %Y, %H:%M")
+        except (ValueError, KeyError):
+            fecha = j.get("started_at", "—")
 
+        # Duración formateada (segundos → "1m 23s" o "12.3s")
+        s = j.get("elapsed_s", 0.0)
+        duracion = f"{int(s)//60}m {int(s)%60:02d}s" if s >= 60 else f"{s:.1f}s"
+
+        # Estado legible con icono
+        status_label = {
+            "completed": "✓ Completado",
+            "failed":    "✕ Error",
+        }.get(j.get("status"), j.get("status", "—"))
+
+        rows.append({
+            "ID":       f"JOB-{j['id']:05d}",
+            "Archivo":  j.get("filename", "—"),
+            "Idiomas":  f"EN → {j.get('target_lang', 'es').upper()}",
+            "CPL":      j.get("cpl", 0),
+            "Líneas":   j.get("n_translations", 0),
+            "% CPL":    j.get("cpl_compliance", 0.0),
+            "Duración": duracion,
+            "Fecha":    fecha,
+            "Estado":   status_label,
+        })
+
+    df = pd.DataFrame(rows)
     st.dataframe(
         df,
         hide_index=True,
         use_container_width=True,
         height=min(58 + n * 38, 600),
         column_config={
-            "ID":       st.column_config.TextColumn("ID",      width="small"),
-            "Cliente":  st.column_config.TextColumn("Cliente", width="small"),
+            "ID":       st.column_config.TextColumn("ID",     width="small"),
             "Archivo":  st.column_config.TextColumn("Archivo", width="large"),
-            "CPL":      st.column_config.NumberColumn("CPL", format="%d"),
+            "CPL":      st.column_config.NumberColumn("CPL",   format="%d"),
             "Líneas":   st.column_config.NumberColumn("Líneas", format="%d"),
+            "% CPL":    st.column_config.NumberColumn("% CPL", format="%.1f%%"),
         },
     )
     st.markdown('<div style="height:12px;"></div>', unsafe_allow_html=True)
     if st.button("Limpiar historial", type="secondary", use_container_width=True):
-        st.session_state.history = []
+        for j in jobs:
+            api_delete_job(j["id"])
         st.session_state.ws_state = "idle"
         st.session_state.ws_result_bytes = None
+        st.toast("Historial vaciado.", icon="🗑")
         st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
