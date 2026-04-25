@@ -89,9 +89,14 @@ async def translate_texts(
     target_lang: str = "es",
     context: str = "",
     cpl_limit: int = 38,
-) -> Dict[int, str]:
+) -> dict:
     """
-    Recibe {index: "texto original"} y devuelve {index: "texto traducido ajustado a CPL"}.
+    Recibe {index: "texto original"} y devuelve un dict con:
+        - translations: {index: "texto traducido ajustado a CPL"}
+        - tokens_prompt: int
+        - tokens_completion: int
+        - elapsed_s: float
+
     Trazas de cada batch escritas en el logger para auditoría.
     """
     system_prompt = build_system_prompt(target_lang, context)
@@ -156,4 +161,9 @@ async def translate_texts(
         dt_total, total_prompt_tokens, total_completion_tokens,
     )
 
-    return translated_dict
+    return {
+        "translations":      translated_dict,
+        "tokens_prompt":     total_prompt_tokens,
+        "tokens_completion": total_completion_tokens,
+        "elapsed_s":         dt_total,
+    }
