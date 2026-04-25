@@ -13,4 +13,5 @@ dependencies = [
     "streamlit>=1.40.0",
     "srt>=3.5.3",
     "uvicorn>=0.44.0",
+    "sqlalchemy>=2.0.0",
 ]
