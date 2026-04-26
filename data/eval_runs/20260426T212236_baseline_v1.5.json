@@ -1,0 +1,62 @@
+{
+  "config": {
+    "name": "baseline_v1.5",
+    "target_lang": "es",
+    "cpl_limit": 42,
+    "context": "",
+    "chunk_size": 5
+  },
+  "timestamp": "2026-04-26T21:22:36",
+  "git_commit": "54a3a08",
+  "n_pairs": 20,
+  "elapsed_s": 8.721,
+  "tokens_prompt": 1784,
+  "tokens_completion": 302,
+  "metrics": {
+    "bleu": 81.75,
+    "bleu_brevity_penalty": 0.986,
+    "bleu_sys_len": 213,
+    "bleu_ref_len": 216,
+    "bleu_precisions": [
+      92.96,
+      87.05,
+      79.77,
+      73.2
+    ],
+    "chrf": 90.53,
+    "chrf_n": 6,
+    "chrf_beta": 2,
+    "cpl_compliance": 100.0,
+    "n_lines_total": 33,
+    "n_lines_over": 0,
+    "max_line_len": 42,
+    "cpl_limit": 42,
+    "glossary_adherence": null,
+    "n_opportunities": 0,
+    "n_applied": 0,
+    "n_terms_in_glossary": 4,
+    "missed_terms": []
+  },
+  "predictions": [
+    "No te he visto en siglos, Marcus.",
+    "Parece que has pasado un infierno.",
+    "Dile a tu hermana que mucha mierda antes\ndel espectáculo de esta noche.",
+    "Te veo en el banco a mediodía. Trae los\ndocumentos.",
+    "No, no el del río, el de la Quinta\nAvenida.",
+    "Genial. Simplemente genial.",
+    "Tranquilo, esto será pan comido.",
+    "Está lloviendo a cántaros. ¿Has traído\nparaguas?",
+    "El servidor está caído. Necesitamos\nreiniciar el firewall antes de la reunión.",
+    "Voy a por un café a Starbucks y te veo en\nPenn Station.",
+    "Tenemos un topo en el departamento.\nAlguien ha estado filtrando información.",
+    "El sospechoso dijo que cooperaría,\npero su abogado no estuvo de acuerdo.",
+    "Lleva la bolsa ligera,\nno la pesada.",
+    "Señoría, mi cliente, Mr. O'Brien,\nha cooperado plenamente.",
+    "<i>Sabía</i> que no me fallarías, chico.",
+    "No te eches atrás ahora.",
+    "Si alguien pregunta, no estuviste aquí.\n¿Entendido?",
+    "Necesitamos 10 miligramos de adrenalina,\n¡ya!",
+    "¡Maldita sea, Marcus!",
+    "Pase lo que pase esta noche... recuerda,\nsiempre te he apoyado."
+  ]
+}
