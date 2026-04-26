@@ -25,8 +25,15 @@ BACKEND_URL = "http://localhost:8000"
 # Todas devuelven valores "seguros" cuando el backend no responde, evitando
 # que la UI explote si uvicorn está caído.
 # ═══════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
 def api_get_glossary() -> list[dict]:
-    """Lista los términos del glosario. [] si el backend no responde."""
+    """Lista los términos del glosario. [] si el backend no responde.
+
+    Cacheada sin TTL: dura toda la sesión hasta que se invalida con
+    api_get_glossary.clear() tras una mutación (POST/DELETE). Esto da
+    latencia predictible: ~1s la primera visita, instantáneo en las
+    siguientes mientras no haya cambios.
+    """
     try:
         r = requests.get(f"{BACKEND_URL}/glossary", timeout=10)
         r.raise_for_status()
@@ -59,8 +66,13 @@ def api_delete_glossary(term_id: int) -> bool:
         return False
 
 
+@st.cache_data(show_spinner=False)
 def api_get_jobs() -> list[dict]:
-    """Lista los jobs (historial) más recientes primero."""
+    """Lista los jobs (historial) más recientes primero.
+
+    Cacheada sin TTL — invalidar con api_get_jobs.clear() tras
+    POST /translate exitoso o DELETE /jobs.
+    """
     try:
         r = requests.get(f"{BACKEND_URL}/jobs", timeout=10)
         r.raise_for_status()
@@ -556,10 +568,9 @@ with st.sidebar:
     selected = st.radio("nav", labels, key="nav_label", label_visibility="collapsed")
     st.session_state.page = PAGES[selected]
 
-    st.markdown(f"""
+    st.markdown("""
     <div class="sb-foot">
-      <div>{len(st.session_state.history)} traducciones · {len(st.session_state.glossary)} reglas</div>
-      <div class="dim">GPT-4o · v1.0</div>
+      <div class="dim">GPT-4o · v1.5</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -649,7 +660,8 @@ def render_workspace():
             st.session_state.ws_result_name  = result["filename"]
             st.session_state.ws_metrics      = result["metrics"]
             # El backend ya persistió el job y sus translations en SQLite
-            # vía save_completed_job() — no hace falta tocar el historial aquí.
+            # vía save_completed_job() — invalidamos el cache para verlo.
+            api_get_jobs.clear()
             st.rerun()
         except requests.exceptions.ConnectionError:
             placeholder.empty()
@@ -719,6 +731,7 @@ def render_glosario():
                         note=ctx.strip(),
                     )
                     if created is not None:
+                        api_get_glossary.clear()   # invalidar cache para ver el nuevo término
                         st.toast(f'Añadido: {created["source"]} → {created["target"]}', icon="✅")
                         st.rerun()
                 else:
@@ -745,6 +758,7 @@ def render_glosario():
             if st.button("Limpiar glosario", type="secondary", use_container_width=True):
                 for term in glossary:
                     api_delete_glossary(term["id"])
+                api_get_glossary.clear()   # invalidar cache para refrescar a vacío
                 st.toast("Glosario vaciado.", icon="🗑")
                 st.rerun()
 
@@ -819,6 +833,7 @@ def render_historial():
     if st.button("Limpiar historial", type="secondary", use_container_width=True):
         for j in jobs:
             api_delete_job(j["id"])
+        api_get_jobs.clear()   # invalidar cache para refrescar a vacío
         st.session_state.ws_state = "idle"
         st.session_state.ws_result_bytes = None
         st.toast("Historial vaciado.", icon="🗑")
