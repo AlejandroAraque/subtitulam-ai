@@ -112,10 +112,17 @@ def main() -> None:
         help="Re-evaluar las predicciones de un JSON guardado (sin llamar a OpenAI). "
              "Solo --cpl puede sobreescribirse; el resto del config viene del JSON.",
     )
+    parser.add_argument(
+        "--filter-dataset", default=None,
+        help="Evaluar solo los pares cuyo campo source_dataset coincida "
+             "(ej. 'wmt13' para excluir bootstrap contaminado, "
+             "'v1.1_bootstrap' para evaluar solo el subset original).",
+    )
 
     args = parser.parse_args()
 
     testset_path = Path(args.testset)
+    filter_ds    = args.filter_dataset
     from eval.runner import _load_testset, _get_git_commit
 
     # ── MODO RE-EVAL ────────────────────────────────────────────────────
@@ -151,6 +158,7 @@ def main() -> None:
                 predictions       = run_data["predictions"],
                 config            = config,
                 testset_path      = testset_path,
+                filter_dataset    = filter_ds,
                 elapsed_s         = run_data.get("elapsed_s", 0.0),
                 tokens_prompt     = run_data.get("tokens_prompt", 0),
                 tokens_completion = run_data.get("tokens_completion", 0),
@@ -169,16 +177,18 @@ def main() -> None:
         )
 
         try:
-            n_pairs = len(_load_testset(testset_path))
+            n_pairs = len(_load_testset(testset_path, filter_dataset=filter_ds))
         except Exception as e:
             print(f"ERROR cargando test-set: {e}", file=sys.stderr)
             sys.exit(1)
 
         _print_header(args, n_pairs, _get_git_commit())
+        if filter_ds:
+            print(f"  Filtro: source_dataset='{filter_ds}'")
         print("  Traduciendo... (esto puede tardar ~10-20s)\n")
 
         try:
-            result = run(config, testset_path=testset_path)
+            result = run(config, testset_path=testset_path, filter_dataset=filter_ds)
         except Exception as e:
             print(f"\n  ERROR durante la ejecución: {e}", file=sys.stderr)
             sys.exit(2)

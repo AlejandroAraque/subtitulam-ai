@@ -27,8 +27,17 @@ DEFAULT_RUNS_DIR     = DATA_DIR / "eval_runs"
 
 # ── Helpers internos ────────────────────────────────────────────────────────
 
-def _load_testset(path: Path) -> list[dict[str, Any]]:
-    """Carga el JSONL del test-set en una lista de dicts."""
+def _load_testset(
+    path: Path,
+    filter_dataset: str | None = None,
+) -> list[dict[str, Any]]:
+    """Carga el JSONL del test-set, opcionalmente filtrando por source_dataset.
+
+    Args:
+        path: ruta al .jsonl.
+        filter_dataset: si se pasa, solo devuelve pares cuyo campo
+            source_dataset coincida (ej. 'wmt13', 'v1.1_bootstrap').
+    """
     if not path.exists():
         raise FileNotFoundError(f"Test-set no encontrado: {path}")
     pairs: list[dict[str, Any]] = []
@@ -37,6 +46,13 @@ def _load_testset(path: Path) -> list[dict[str, Any]]:
             line = line.strip()
             if line:
                 pairs.append(json.loads(line))
+    if filter_dataset:
+        pairs = [p for p in pairs if p.get("source_dataset") == filter_dataset]
+        if not pairs:
+            raise ValueError(
+                f"Filtro source_dataset='{filter_dataset}' no produjo ningún par. "
+                f"Revisa los valores en {path.name}."
+            )
     return pairs
 
 
@@ -63,19 +79,27 @@ def _load_glossary_from_db() -> list[dict[str, Any]]:
 
 # ── API pública ─────────────────────────────────────────────────────────────
 
-def run(config: RunConfig, testset_path: Path = DEFAULT_TESTSET_PATH) -> RunResult:
+def run(
+    config: RunConfig,
+    testset_path: Path = DEFAULT_TESTSET_PATH,
+    filter_dataset: str | None = None,
+) -> RunResult:
     """Ejecuta una evaluación completa con la configuración dada.
 
     Pasos:
-      1. Carga el test-set.
+      1. Carga el test-set (opcionalmente filtrado por source_dataset).
       2. Llama a translation_service.translate_texts (asíncrono).
       3. Lee el glosario actual de SQLite.
       4. Ejecuta las 4 métricas registradas.
       5. Devuelve un RunResult serializable.
 
+    Args:
+        filter_dataset: si se pasa, solo evalúa pares cuyo source_dataset
+            coincida (ej. 'wmt13' para excluir bootstrap contaminado).
+
     No persiste a disco — usa save() después si quieres guardar el JSON.
     """
-    pairs      = _load_testset(testset_path)
+    pairs      = _load_testset(testset_path, filter_dataset=filter_dataset)
     sources    = [p["source"] for p in pairs]
     references = [p["target"] for p in pairs]
 
@@ -121,6 +145,7 @@ def run_from_predictions(
     config: RunConfig,
     *,
     testset_path: Path = DEFAULT_TESTSET_PATH,
+    filter_dataset: str | None = None,
     elapsed_s: float = 0.0,
     tokens_prompt: int = 0,
     tokens_completion: int = 0,
@@ -136,10 +161,13 @@ def run_from_predictions(
         predictions: traducciones ya generadas, alineadas 1:1 con el test-set.
         config: configuración a registrar en el RunResult (típicamente la
             del run original con name + "_reeval").
+        filter_dataset: filtrar el test-set por source_dataset (debe coincidir
+            con el filtro usado en el run original para que las predicciones
+            sigan alineadas 1:1).
         elapsed_s, tokens_*: se propagan tal cual del run original para no
             perder la trazabilidad de coste.
     """
-    pairs      = _load_testset(testset_path)
+    pairs      = _load_testset(testset_path, filter_dataset=filter_dataset)
     sources    = [p["source"] for p in pairs]
     references = [p["target"] for p in pairs]
 
