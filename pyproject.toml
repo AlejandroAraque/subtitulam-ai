@@ -15,4 +15,5 @@ dependencies = [
     "uvicorn>=0.44.0",
     "sqlalchemy>=2.0.0",
     "sacrebleu>=2.6.0",
+    "datasets>=4.8.5",
 ]
