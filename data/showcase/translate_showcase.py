@@ -35,6 +35,7 @@ from app.core.database import SessionLocal           # noqa: E402
 from app.services     import translation_service     # noqa: E402
 from app.services     import history_service         # noqa: E402
 from app.services     import context_service         # noqa: E402
+from app.services     import glossary_service        # noqa: E402
 
 HERE             = Path(__file__).parent
 DEFAULT_SRC_PATH = HERE / "selected" / "showcase_en.srt"
@@ -97,6 +98,18 @@ async def main_async(args) -> int:
         else:
             print(f"      LLM no reconoció la obra — sin contexto auto")
 
+    # ── Cargar glosario de SQLite (a menos que se haya pasado --no-glossary) ─
+    glossary_terms: list[dict] = []
+    if not args.no_glossary:
+        _gdb = SessionLocal()
+        try:
+            glossary_terms = [t.to_dict() for t in glossary_service.list_terms(_gdb)]
+        finally:
+            _gdb.close()
+        print(f"      Glosario: {len(glossary_terms)} término(s) cargados de SQLite")
+    else:
+        print(f"      Glosario: desactivado (--no-glossary)")
+
     # ── Modo --index: crea Job pendiente para que translate_texts indexe ─
     db = None
     job = None
@@ -115,7 +128,7 @@ async def main_async(args) -> int:
 
     texts_dict = {c["idx"]: c["text"] for c in cues}
     print(f"[3/4] Traduciendo · target={args.target_lang} · cpl={args.cpl} "
-          f"· rag={args.rag} · sliding=20")
+          f"· rag={args.rag} · sliding=20 · glossary={len(glossary_terms)}")
 
     try:
         result = await translation_service.translate_texts(
@@ -127,6 +140,7 @@ async def main_async(args) -> int:
             filename=src_path.name,
             use_rag=args.rag,
             sliding_window_size=20,
+            glossary=glossary_terms,
         )
     except Exception as e:
         if db is not None and job is not None:
@@ -189,6 +203,9 @@ def main() -> int:
     parser.add_argument("--auto-context", action="store_true",
                         help="Generar contexto desde el nombre del archivo "
                              "(via gpt-4o-mini). Solo si --context está vacío.")
+    parser.add_argument("--no-glossary", action="store_true",
+                        help="Desactivar el glosario (por defecto se inyecta "
+                             "lo que haya en SQLite). Útil para ablar.")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 

@@ -54,7 +54,10 @@ async def translate_subtitle(
         if auto_context and not context.strip():
             context = await context_service.generate_context_from_title(file.filename)
 
-        # ── 1. Crear Job pendiente — necesitamos job.id para indexar batch ─
+        # ── 1. Cargar glosario actual (reglas obligatorias en el prompt) ──
+        glossary_terms = [t.to_dict() for t in glossary_service.list_terms(db)]
+
+        # ── 2. Crear Job pendiente — necesitamos job.id para indexar batch ─
         job = history_service.create_pending_job(
             db,
             filename=file.filename,
@@ -63,7 +66,7 @@ async def translate_subtitle(
             context=context,
         )
 
-        # ── 2. Traducir con RAG + sliding window activos (modo full) ──────
+        # ── 3. Traducir con RAG + sliding window + glosario activos ───────
         try:
             result = await translation_service.translate_texts(
                 cues_source,
@@ -74,6 +77,7 @@ async def translate_subtitle(
                 filename=file.filename,
                 use_rag=True,
                 sliding_window_size=20,
+                glossary=glossary_terms,
             )
         except Exception as e:
             history_service.fail_job(db, job, str(e))

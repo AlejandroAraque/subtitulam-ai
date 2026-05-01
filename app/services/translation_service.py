@@ -33,8 +33,51 @@ TARGET_LANGUAGES = {
 }
 
 
-def build_system_prompt(target_lang: str, context: str = "") -> str:
-    """Construye el system prompt con idioma destino y contexto opcional."""
+def _format_glossary_block(glossary: list[dict]) -> str:
+    """Devuelve el bloque GLOSARIO OBLIGATORIO o '' si la lista está vacía.
+
+    Cada término aparece como una viñeta con flecha. Se incluye categoría
+    entre corchetes y, si existe, la nota detrás de em-dash. El orden es
+    determinista (por categoría, luego source) para que el prompt sea
+    reproducible entre runs.
+    """
+    if not glossary:
+        return ""
+
+    terms = sorted(
+        glossary,
+        key=lambda t: (
+            (t.get("category") or "término").lower(),
+            (t.get("source") or "").lower(),
+        ),
+    )
+    lines = [
+        "GLOSARIO OBLIGATORIO (prioritario sobre EJEMPLOS PREVIOS y CONTEXTO RECIENTE):",
+        "Estas traducciones son inalterables. Si el término del original aparece en el texto, "
+        "debe traducirse exactamente como se indica.",
+    ]
+    for t in terms:
+        src = (t.get("source") or "").strip()
+        tgt = (t.get("target") or "").strip()
+        cat = (t.get("category") or "término").strip()
+        note = (t.get("note") or "").strip()
+        if not src or not tgt:
+            continue
+        line = f'  • "{src}" → "{tgt}" [{cat}]'
+        if note:
+            line += f" — {note}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_system_prompt(
+    target_lang: str,
+    context: str = "",
+    glossary: list[dict] | None = None,
+) -> str:
+    """Construye el system prompt con idioma destino, contexto opcional y
+    glosario opcional. Si `glossary` es None o lista vacía, no se añade
+    el bloque GLOSARIO."""
     lang_label = TARGET_LANGUAGES.get(target_lang, TARGET_LANGUAGES["es"])
 
     base = f"""Eres un traductor profesional experto en subtítulos de cine y televisión del inglés al {lang_label}.
@@ -78,6 +121,11 @@ INSTRUCCIONES OBLIGATORIAS:
 CONTEXTO DE LA OBRA (úsalo para desambiguar referencias, personajes y tono):
 {context.strip()}
 """
+
+    glossary_block = _format_glossary_block(glossary or [])
+    if glossary_block:
+        base += "\n" + glossary_block + "\n"
+
     return base
 
 
@@ -188,6 +236,7 @@ async def translate_texts(
     rag_top_k: int = 3,
     rag_threshold: float = 0.5,
     rag_max_examples: int = 5,
+    glossary: list[dict] | None = None,
 ) -> dict:
     """
     Recibe {index: "texto original"} y devuelve un dict con:
@@ -204,7 +253,7 @@ async def translate_texts(
     sliding_window_size: cuántas cues anteriores DEL MISMO job inyectar como
         contexto en el prompt. 0 = desactivado (eval sobre samples sueltos).
     """
-    system_prompt = build_system_prompt(target_lang, context)
+    system_prompt = build_system_prompt(target_lang, context, glossary=glossary)
     items = list(texts_dict.items())
     translated_dict: Dict[int, str] = {}
 
@@ -212,11 +261,12 @@ async def translate_texts(
     total_completion_tokens = 0
     t_job_start = time.time()
 
+    n_glossary = len(glossary) if glossary else 0
     logger.info(
         "── NUEVO JOB ──  cues=%d · chunk_size=%d · target=%s · cpl=%d · "
-        "use_rag=%s · job_id=%s · sliding=%d · context=%r",
+        "use_rag=%s · job_id=%s · sliding=%d · glossary=%d · context=%r",
         len(items), chunk_size, target_lang, cpl_limit,
-        use_rag, job_id, sliding_window_size,
+        use_rag, job_id, sliding_window_size, n_glossary,
         (context[:60] + "…") if len(context) > 60 else context,
     )
 
