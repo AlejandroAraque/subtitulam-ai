@@ -24,6 +24,12 @@ env/
 *.db
 *.sqlite3
 
+# Almacén vectorial de ChromaDB (SQLite + binarios internos, no versionar)
+data/chromadb/
+
+# Memoria del TFM — notas personales que viven solo en local
+docs/memoria/
+
 # Archivos temporales de descarga (para que no subas los SRT de prueba)
 *.srt
 *.mp4
