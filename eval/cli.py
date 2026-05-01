@@ -118,6 +118,12 @@ def main() -> None:
              "(ej. 'wmt13' para excluir bootstrap contaminado, "
              "'v1.1_bootstrap' para evaluar solo el subset original).",
     )
+    parser.add_argument(
+        "--rag", action="store_true",
+        help="Activar RAG: queries a ChromaDB en cada batch para inyectar "
+             "ejemplos de traducciones previas. Modo read-only — no indexa "
+             "(evita contaminar el corpus con las cues del test-set).",
+    )
 
     args = parser.parse_args()
 
@@ -141,6 +147,7 @@ def main() -> None:
             cpl_limit   = args.cpl,                           # ← único override permitido
             context     = original_cfg.get("context", ""),
             chunk_size  = original_cfg.get("chunk_size", 5),
+            use_rag     = original_cfg.get("use_rag", False),
         )
 
         # Sobrescribir args.* para que el header refleje lo que se va a evaluar
@@ -174,6 +181,7 @@ def main() -> None:
             target_lang = args.target_lang,
             cpl_limit   = args.cpl,
             context     = args.context,
+            use_rag     = args.rag,
         )
 
         try:

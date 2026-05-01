@@ -23,6 +23,7 @@ class RunConfig:
     cpl_limit:   int = 42
     context:     str = ""             # contexto global a inyectar en el prompt
     chunk_size:  int = 5
+    use_rag:     bool = False         # activa retrieval ChromaDB (sin contaminar)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

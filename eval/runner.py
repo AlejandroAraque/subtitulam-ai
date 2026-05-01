@@ -105,6 +105,8 @@ def run(
 
     # translate_texts espera un dict {idx: texto} y devuelve un dict
     # {translations, tokens_prompt, tokens_completion, elapsed_s}.
+    # job_id=None y sliding_window=0: no contamina ChromaDB y los cues
+    # del test-set son samples sueltos (no narrativa secuencial).
     texts_dict = {i + 1: src for i, src in enumerate(sources)}
     trans_out  = asyncio.run(translation_service.translate_texts(
         texts_dict,
@@ -112,6 +114,9 @@ def run(
         context=config.context,
         cpl_limit=config.cpl_limit,
         chunk_size=config.chunk_size,
+        job_id=None,
+        use_rag=config.use_rag,
+        sliding_window_size=0,
     ))
 
     # Reconstruir predictions en el mismo orden que sources
