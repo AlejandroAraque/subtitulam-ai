@@ -34,6 +34,7 @@ if str(_ROOT) not in sys.path:
 from app.core.database import SessionLocal           # noqa: E402
 from app.services     import translation_service     # noqa: E402
 from app.services     import history_service         # noqa: E402
+from app.services     import context_service         # noqa: E402
 
 HERE             = Path(__file__).parent
 DEFAULT_SRC_PATH = HERE / "selected" / "showcase_en.srt"
@@ -86,6 +87,16 @@ async def main_async(args) -> int:
     cues = parse_srt(src_path)
     print(f"[1/4] Cargados {len(cues)} cues de {src_path.name}")
 
+    # ── Auto-context (opt-in, solo si no se pasó --context manual) ───────
+    effective_context = args.context
+    if args.auto_context and not effective_context.strip():
+        print(f"      Generando contexto automático desde el nombre…")
+        effective_context = await context_service.generate_context_from_title(src_path.name)
+        if effective_context:
+            print(f"      Contexto: {effective_context[:120]}{'…' if len(effective_context) > 120 else ''}")
+        else:
+            print(f"      LLM no reconoció la obra — sin contexto auto")
+
     # ── Modo --index: crea Job pendiente para que translate_texts indexe ─
     db = None
     job = None
@@ -96,7 +107,7 @@ async def main_async(args) -> int:
             filename=src_path.name,
             target_lang=args.target_lang,
             cpl=args.cpl,
-            context=args.context,
+            context=effective_context,
         )
         print(f"[2/4] Job {job.id} creado en SQLite (modo --index)")
     else:
@@ -110,9 +121,10 @@ async def main_async(args) -> int:
         result = await translation_service.translate_texts(
             texts_dict,
             target_lang=args.target_lang,
-            context=args.context,
+            context=effective_context,
             cpl_limit=args.cpl,
             job_id=(job.id if job else None),
+            filename=src_path.name,
             use_rag=args.rag,
             sliding_window_size=20,
         )
@@ -174,6 +186,9 @@ def main() -> int:
     parser.add_argument("--index", action="store_true",
                         help="Crear Job en SQLite e indexar las traducciones "
                              "en ChromaDB (mismo flujo que /translate).")
+    parser.add_argument("--auto-context", action="store_true",
+                        help="Generar contexto desde el nombre del archivo "
+                             "(via gpt-4o-mini). Solo si --context está vacío.")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 

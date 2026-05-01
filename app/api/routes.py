@@ -11,6 +11,7 @@ from app.services import (
     translation_service,
     glossary_service,
     history_service,
+    context_service,
 )
 
 router = APIRouter()
@@ -33,6 +34,7 @@ async def translate_subtitle(
     context: str = Form(""),
     target_lang: str = Form("es"),
     cpl: int = Form(38),
+    auto_context: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """Traduce un .srt con RAG + sliding window, persiste el job y sus cues."""
@@ -45,6 +47,10 @@ async def translate_subtitle(
         text_content = content.decode("utf-8")
         original_subtitles = srt_service.parse_srt(text_content)
         cues_source = {s.index: s.content for s in original_subtitles}
+
+        # ── 0. Auto-context (opt-in, solo si el usuario no escribió contexto)
+        if auto_context and not context.strip():
+            context = await context_service.generate_context_from_title(file.filename)
 
         # ── 1. Crear Job pendiente — necesitamos job.id para indexar batch ─
         job = history_service.create_pending_job(
@@ -63,6 +69,7 @@ async def translate_subtitle(
                 context=context,
                 cpl_limit=cpl,
                 job_id=job.id,
+                filename=file.filename,
                 use_rag=True,
                 sliding_window_size=20,
             )
