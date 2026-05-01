@@ -90,14 +90,30 @@ def api_delete_job(job_id: int) -> bool:
         return False
 
 
-def api_export_glossary_csv() -> Optional[bytes]:
-    """Descarga el glosario completo como bytes CSV. None si el backend falla."""
-    try:
-        r = requests.get(f"{BACKEND_URL}/glossary/export.csv", timeout=15)
-        r.raise_for_status()
-        return r.content
-    except requests.exceptions.RequestException:
-        return None
+def _build_glossary_csv(glossary: list[dict]) -> bytes:
+    """Construye el CSV (BOM UTF-8 + ; separator) localmente desde los
+    términos ya cargados en memoria. Evita una segunda llamada HTTP al
+    backend en cada render — la sección CSV ya no bloquea el primer paint
+    de la página.
+    """
+    import csv as _csv
+    import io as _io
+    output = _io.StringIO()
+    writer = _csv.DictWriter(
+        output,
+        fieldnames=["source", "target", "category", "note"],
+        delimiter=";",
+        quoting=_csv.QUOTE_MINIMAL,
+    )
+    writer.writeheader()
+    for t in glossary:
+        writer.writerow({
+            "source":   t.get("source", ""),
+            "target":   t.get("target", ""),
+            "category": t.get("category", "término"),
+            "note":     t.get("note", ""),
+        })
+    return ("﻿" + output.getvalue()).encode("utf-8")
 
 
 def api_import_glossary_csv(filename: str, file_bytes: bytes) -> dict:
@@ -810,7 +826,7 @@ def render_glosario():
             '</div>',
             unsafe_allow_html=True,
         )
-        csv_bytes = api_export_glossary_csv() or b""
+        csv_bytes = _build_glossary_csv(glossary)
         st.download_button(
             label=f"⬇  glossary.csv ({len(glossary)} términos)",
             data=csv_bytes,
