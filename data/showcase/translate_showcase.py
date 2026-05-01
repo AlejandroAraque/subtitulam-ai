@@ -1,14 +1,22 @@
 """
-Traduce data/showcase/selected/showcase_en.srt y guarda el resultado en
-data/showcase/runs/<version>_showcase_es.srt.
+Traduce un .srt y guarda el resultado en data/showcase/runs/<version>_showcase_es.srt.
 
-Llama a translation_service.translate_texts directamente (igual que el
-módulo eval), sin pasar por el endpoint HTTP. Más rápido y sin necesidad
-de tener uvicorn corriendo.
+Llama a translation_service.translate_texts directamente, sin pasar por
+el endpoint HTTP.
 
-Uso:
+Uso básico (legacy, sin RAG ni indexado):
     uv run python data/showcase/translate_showcase.py --version v2.2_pre_rag
-    uv run python data/showcase/translate_showcase.py --version v2.3 --context "Drama coreano: hermanas Yujin y Mingyeong"
+
+Con RAG activo (lee ChromaDB pero no indexa):
+    uv run python data/showcase/translate_showcase.py --version v2.3 --rag
+
+Indexar en ChromaDB (modo "warm-up"): crea Job en SQLite + indexa cada batch.
+Equivale a una llamada real al endpoint /translate:
+    uv run python data/showcase/translate_showcase.py --version v2.3_h1 \\
+        --srt-path data/showcase/selected/showcase_en_h1.srt --rag --index
+
+Override de SRT origen:
+    --srt-path PATH    (default: data/showcase/selected/showcase_en.srt)
 """
 from __future__ import annotations
 
@@ -23,11 +31,13 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from app.services import translation_service  # noqa: E402
+from app.core.database import SessionLocal           # noqa: E402
+from app.services     import translation_service     # noqa: E402
+from app.services     import history_service         # noqa: E402
 
-HERE     = Path(__file__).parent
-SRC_PATH = HERE / "selected" / "showcase_en.srt"
-RUNS_DIR = HERE / "runs"
+HERE             = Path(__file__).parent
+DEFAULT_SRC_PATH = HERE / "selected" / "showcase_en.srt"
+RUNS_DIR         = HERE / "runs"
 
 TS_RE = re.compile(
     r'\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}'
@@ -62,35 +72,87 @@ def rebuild_srt(cues: list[dict], translations: dict[int, str]) -> str:
     return '\n'.join(parts).rstrip() + '\n'
 
 
-async def main_async(version: str, context: str, target_lang: str, cpl_limit: int) -> int:
-    if not SRC_PATH.exists():
-        print(f"ERROR: no existe {SRC_PATH}", file=sys.stderr)
+async def main_async(args) -> int:
+    src_path = Path(args.srt_path)
+    if not src_path.exists():
+        print(f"ERROR: no existe {src_path}", file=sys.stderr)
         return 1
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RUNS_DIR / f"{version}_showcase_es.srt"
+    out_path = RUNS_DIR / f"{args.version}_showcase_es.srt"
     if out_path.exists():
         print(f"AVISO: {out_path.name} ya existe — se sobrescribirá")
 
-    cues = parse_srt(SRC_PATH)
-    print(f"[1/3] Cargados {len(cues)} cues de showcase_en.srt")
+    cues = parse_srt(src_path)
+    print(f"[1/4] Cargados {len(cues)} cues de {src_path.name}")
+
+    # ── Modo --index: crea Job pendiente para que translate_texts indexe ─
+    db = None
+    job = None
+    if args.index:
+        db = SessionLocal()
+        job = history_service.create_pending_job(
+            db,
+            filename=src_path.name,
+            target_lang=args.target_lang,
+            cpl=args.cpl,
+            context=args.context,
+        )
+        print(f"[2/4] Job {job.id} creado en SQLite (modo --index)")
+    else:
+        print(f"[2/4] Sin --index: no se persiste Job ni se indexa en ChromaDB")
 
     texts_dict = {c["idx"]: c["text"] for c in cues}
-    print(f"[2/3] Llamando a translation_service · target={target_lang} · cpl={cpl_limit} "
-          f"· context={'(vacío)' if not context else context[:40]+'...'}")
-    result = await translation_service.translate_texts(
-        texts_dict,
-        target_lang=target_lang,
-        context=context,
-        cpl_limit=cpl_limit,
-    )
+    print(f"[3/4] Traduciendo · target={args.target_lang} · cpl={args.cpl} "
+          f"· rag={args.rag} · sliding=20")
+
+    try:
+        result = await translation_service.translate_texts(
+            texts_dict,
+            target_lang=args.target_lang,
+            context=args.context,
+            cpl_limit=args.cpl,
+            job_id=(job.id if job else None),
+            use_rag=args.rag,
+            sliding_window_size=20,
+        )
+    except Exception as e:
+        if db is not None and job is not None:
+            history_service.fail_job(db, job, str(e))
+            db.close()
+        print(f"ERROR durante la traducción: {e}", file=sys.stderr)
+        return 2
+
     translations = result["translations"]
+
+    # ── Si --index, completar el job (insertar Translations + status='completed') ─
+    if args.index and db is not None and job is not None:
+        # Calcular CPL compliance
+        all_lines: list[str] = []
+        for txt in translations.values():
+            all_lines.extend([ln for ln in txt.split("\n") if ln.strip()])
+        n_total = max(1, len(all_lines))
+        n_under = sum(1 for ln in all_lines if len(ln) <= args.cpl)
+        cpl_compliance = round(n_under / n_total * 100, 1)
+
+        await history_service.complete_job(
+            db,
+            job=job,
+            cues_source=texts_dict,
+            cues_target=translations,
+            elapsed_s=result["elapsed_s"],
+            cpl_compliance=cpl_compliance,
+            tokens_prompt=result["tokens_prompt"],
+            tokens_completion=result["tokens_completion"],
+        )
+        db.close()
+        print(f"      Job {job.id} completado · CPL compliance: {cpl_compliance}%")
 
     srt_out = rebuild_srt(cues, translations)
     out_path.write_text(srt_out, encoding="utf-8")
     size_kb = out_path.stat().st_size / 1024
 
-    print(f"[3/3] Escrito {out_path.relative_to(HERE.parent.parent)} ({size_kb:.1f} KB)")
+    print(f"[4/4] Escrito {out_path.relative_to(HERE.parent.parent)} ({size_kb:.1f} KB)")
     print(f"      Tokens prompt={result['tokens_prompt']}, completion={result['tokens_completion']}, "
           f"total={result['tokens_prompt']+result['tokens_completion']}")
     print(f"      Latencia: {result['elapsed_s']:.2f}s")
@@ -100,15 +162,20 @@ async def main_async(version: str, context: str, target_lang: str, cpl_limit: in
 def main() -> int:
     parser = argparse.ArgumentParser(prog="translate_showcase")
     parser.add_argument("--version", required=True,
-                        help="Etiqueta de versión, p.ej. 'v2.2_pre_rag', 'v2.3', 'v2.4'.")
+                        help="Etiqueta de versión, p.ej. 'v2.3_h2_no_rag'.")
+    parser.add_argument("--srt-path", default=str(DEFAULT_SRC_PATH),
+                        help=f"Ruta al SRT a traducir. Default: {DEFAULT_SRC_PATH.name}")
     parser.add_argument("--context", default="",
                         help="Contexto global a inyectar en el prompt.")
     parser.add_argument("--target-lang", default="es")
     parser.add_argument("--cpl", type=int, default=42)
+    parser.add_argument("--rag", action="store_true",
+                        help="Activar RAG: queries a ChromaDB en cada batch.")
+    parser.add_argument("--index", action="store_true",
+                        help="Crear Job en SQLite e indexar las traducciones "
+                             "en ChromaDB (mismo flujo que /translate).")
     args = parser.parse_args()
-    return asyncio.run(main_async(
-        args.version, args.context, args.target_lang, args.cpl
-    ))
+    return asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":
