@@ -90,7 +90,10 @@ async def add_translations(
     sources = [t["source_text"] for t in translations]
     vectors = await embed_batch(sources)
 
-    ids = [f"translation_{t['id']}" for t in translations]
+    # ID compuesto estable: no depende del Translation.id de SQLite, así
+    # podemos indexar EN MITAD de un job (v2.3) antes de que SQLite haya
+    # asignado IDs. Idempotente: re-indexar el mismo (job, cue) sobrescribe.
+    ids = [f"job_{job_id}_cue_{t['cue_idx']}" for t in translations]
     metadatas = [
         {
             "job_id":      job_id,

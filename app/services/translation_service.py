@@ -50,7 +50,13 @@ INSTRUCCIONES OBLIGATORIAS:
    - "I <i>knew</i> you'd come through" → "<i>Sabía</i> que no me fallarías".
    - Si la etiqueta envuelve una palabra con énfasis, tradúcela manteniendo el énfasis donde cae naturalmente en destino.
 7. NO TRADUZCAS: nombres propios de personas, marcas comerciales, topónimos consolidados (Starbucks, Penn Station, Mr. O'Brien) ni acrónimos técnicos (firewall, server).
-8. Formato ESTRICTO de salida:
+8. COHERENCIA NARRATIVA (si el usuario incluye los bloques opcionales más abajo):
+   - "EJEMPLOS PREVIOS" o "CONTEXTO RECIENTE" muestran traducciones ya hechas.
+   - Mantén las MISMAS elecciones léxicas para términos repetidos (si "bank"
+     se tradujo como "banco" antes, no uses "orilla" ahora).
+   - Mantén nombres propios IDÉNTICOS (sin variantes de género/acento).
+   - Mantén el mismo registro y tono entre cues consecutivos del mismo personaje.
+9. Formato ESTRICTO de salida:
    - Inicia cada bloque con el número recibido seguido de dos puntos.
    - Ejemplo:
      5: Texto de la primera línea
@@ -64,6 +70,53 @@ CONTEXTO DE LA OBRA (úsalo para desambiguar referencias, personajes y tono):
 {context.strip()}
 """
     return base
+
+
+def build_user_prompt(
+    batch_items: list[tuple[int, str]],
+    rag_examples: list[dict] | None = None,
+    recent_window: list[tuple[int, str, str]] | None = None,
+) -> str:
+    """Construye el user message del batch con bloques opcionales.
+
+    Args:
+        batch_items: lista de (cue_idx, source_text) a traducir AHORA.
+        rag_examples: ejemplos retrievados de ChromaDB. Cada dict con keys
+            'source_text' y 'target_text'. Si None o vacío, no se incluye
+            el bloque.
+        recent_window: traducciones recientes del MISMO archivo, en orden
+            cronológico. Lista de (cue_idx, source, target). Si None o
+            vacío, no se incluye el bloque.
+
+    Returns:
+        El texto del user message, listo para mandar a OpenAI.
+    """
+    parts: list[str] = []
+
+    if rag_examples:
+        parts.append("EJEMPLOS PREVIOS (traducciones similares de archivos pasados):")
+        for ex in rag_examples:
+            src = ex.get("source_text", "").replace("\n", " ").strip()
+            tgt = ex.get("target_text", "").replace("\n", " ").strip()
+            if src and tgt:
+                parts.append(f'  EN: "{src}"')
+                parts.append(f'  ES: "{tgt}"')
+        parts.append("")
+
+    if recent_window:
+        parts.append("CONTEXTO RECIENTE (cues anteriores del MISMO archivo):")
+        for cue_idx, src, tgt in recent_window:
+            src = src.replace("\n", " ").strip()
+            tgt = tgt.replace("\n", " ").strip()
+            parts.append(f'  {cue_idx} EN: "{src}"')
+            parts.append(f'  {cue_idx} ES: "{tgt}"')
+        parts.append("")
+
+    parts.append("AHORA TRADUCE (manteniendo coherencia con lo anterior si aplica):")
+    for idx, src in batch_items:
+        parts.append(f"{idx}: {src}")
+
+    return "\n".join(parts)
 
 
 def parsear_traducciones(traduccion_bruta: str) -> Dict[int, str]:
@@ -83,12 +136,48 @@ def parsear_traducciones(traduccion_bruta: str) -> Dict[int, str]:
     return traducciones
 
 
+async def _retrieve_for_batch(
+    batch_items: list[tuple[int, str]],
+    k: int,
+    threshold: float,
+    max_total: int,
+) -> list[dict]:
+    """RAG: query ChromaDB para cada cue del batch, dedup por source_text,
+    devuelve los top max_total ordenados por similitud descendente."""
+    from app.services import rag_service  # import local: rompe ciclo
+    seen: set[str] = set()
+    results: list[dict] = []
+    for _, src in batch_items:
+        try:
+            hits = await rag_service.query_similar(src, k=k)
+        except Exception as e:
+            logger.warning("RAG query falló para cue: %s", e)
+            continue
+        for hit in hits:
+            if hit["similarity"] < threshold:
+                continue
+            key = hit["source_text"]
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(hit)
+    results.sort(key=lambda h: h["similarity"], reverse=True)
+    return results[:max_total]
+
+
 async def translate_texts(
     texts_dict: Dict[int, str],
     chunk_size: int = 5,
     target_lang: str = "es",
     context: str = "",
     cpl_limit: int = 38,
+    *,
+    job_id: int | None = None,
+    use_rag: bool = True,
+    sliding_window_size: int = 20,
+    rag_top_k: int = 3,
+    rag_threshold: float = 0.5,
+    rag_max_examples: int = 5,
 ) -> dict:
     """
     Recibe {index: "texto original"} y devuelve un dict con:
@@ -97,7 +186,13 @@ async def translate_texts(
         - tokens_completion: int
         - elapsed_s: float
 
-    Trazas de cada batch escritas en el logger para auditoría.
+    Modos (ver matriz en docs):
+      - use_rag=False                → modo legacy / baseline puro.
+      - use_rag=True, job_id=None    → query-only (eval +RAG sin contaminar corpus).
+      - use_rag=True, job_id=N       → full: query + indexa cada batch.
+
+    sliding_window_size: cuántas cues anteriores DEL MISMO job inyectar como
+        contexto en el prompt. 0 = desactivado (eval sobre samples sueltos).
     """
     system_prompt = build_system_prompt(target_lang, context)
     items = list(texts_dict.items())
@@ -108,17 +203,47 @@ async def translate_texts(
     t_job_start = time.time()
 
     logger.info(
-        "── NUEVO JOB ──  cues=%d · chunk_size=%d · target=%s · cpl=%d · context=%r",
+        "── NUEVO JOB ──  cues=%d · chunk_size=%d · target=%s · cpl=%d · "
+        "use_rag=%s · job_id=%s · sliding=%d · context=%r",
         len(items), chunk_size, target_lang, cpl_limit,
-        (context[:80] + "…") if len(context) > 80 else context,
+        use_rag, job_id, sliding_window_size,
+        (context[:60] + "…") if len(context) > 60 else context,
     )
 
     for i in range(0, len(items), chunk_size):
         bloque = items[i:i + chunk_size]
-        texto_prompt = "\n\n".join([f"{idx}: {texto}" for idx, texto in bloque])
         batch_label = f"batch {bloque[0][0]}-{bloque[-1][0]}"
 
-        logger.info("→ %s · enviando (%d cues)", batch_label, len(bloque))
+        # ── 1. RAG retrieval ──────────────────────────────────────────────
+        rag_examples: list[dict] = []
+        if use_rag:
+            rag_examples = await _retrieve_for_batch(
+                bloque,
+                k=rag_top_k,
+                threshold=rag_threshold,
+                max_total=rag_max_examples,
+            )
+
+        # ── 2. Sliding window: últimas N traducciones del MISMO job ───────
+        recent_window: list[tuple[int, str, str]] = []
+        if sliding_window_size > 0 and translated_dict:
+            recent_idxs = list(translated_dict.keys())[-sliding_window_size:]
+            recent_window = [
+                (idx, texts_dict[idx], translated_dict[idx])
+                for idx in recent_idxs
+            ]
+
+        # ── 3. Construir user prompt con bloques opcionales ───────────────
+        user_prompt = build_user_prompt(
+            batch_items=bloque,
+            rag_examples=rag_examples,
+            recent_window=recent_window,
+        )
+
+        logger.info(
+            "→ %s · %d cues · %d RAG · %d window",
+            batch_label, len(bloque), len(rag_examples), len(recent_window),
+        )
         t_batch_start = time.time()
 
         try:
@@ -126,7 +251,7 @@ async def translate_texts(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": texto_prompt},
+                    {"role": "user",   "content": user_prompt},
                 ],
                 temperature=0.3,
                 max_tokens=800,
@@ -149,6 +274,29 @@ async def translate_texts(
 
             for idx, texto_trad in traducciones_parseadas.items():
                 translated_dict[idx] = ajustar_cpl_optimo(texto_trad, max_cpl=cpl_limit)
+
+            # ── 4. Indexar este batch en ChromaDB (solo si full mode) ─────
+            if use_rag and job_id is not None:
+                from app.services import rag_service  # import local
+                to_index = [
+                    {
+                        "cue_idx":     idx,
+                        "source_text": texts_dict[idx],
+                        "target_text": translated_dict[idx],
+                        "target_lang": target_lang,
+                    }
+                    for idx, _ in bloque
+                    if idx in translated_dict
+                       and not translated_dict[idx].startswith("[ERROR]")
+                ]
+                if to_index:
+                    try:
+                        await rag_service.add_translations(job_id, to_index)
+                    except Exception as e:
+                        logger.warning(
+                            "RAG indexación falló en %s (no bloqueante): %s",
+                            batch_label, e,
+                        )
 
         except Exception as e:
             logger.error("✖ %s · fallo: %s", batch_label, str(e))
