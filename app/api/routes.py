@@ -1,3 +1,5 @@
+import csv
+import io
 from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
@@ -157,6 +159,84 @@ def delete_glossary_term(term_id: int, db: Session = Depends(get_db)):
     if not glossary_service.delete_term(db, term_id):
         raise HTTPException(status_code=404, detail="Término no encontrado.")
     return Response(status_code=204)
+
+
+@router.get("/glossary/export.csv")
+def export_glossary_csv(db: Session = Depends(get_db)):
+    """Devuelve el glosario como CSV listo para Excel español:
+       - UTF-8 con BOM (Excel detecta encoding y respeta tildes/ñ)
+       - Separador ';' (default de Excel en locale ES)
+       - QUOTE_MINIMAL: solo se citan campos con caracteres especiales.
+    """
+    terms = glossary_service.list_terms(db)
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["source", "target", "category", "note"],
+        delimiter=";",
+        quoting=csv.QUOTE_MINIMAL,
+    )
+    writer.writeheader()
+    for t in terms:
+        writer.writerow({
+            "source":   t.source,
+            "target":   t.target,
+            "category": t.category,
+            "note":     t.note,
+        })
+    # BOM (﻿) al inicio para que Excel detecte UTF-8 correctamente
+    csv_bytes = ("﻿" + output.getvalue()).encode("utf-8")
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="glossary.csv"'},
+    )
+
+
+@router.post("/glossary/import")
+async def import_glossary_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Importa un CSV con columnas source,target,category,note.
+
+    Auto-detecta:
+      - Encoding: UTF-8 (con o sin BOM) o Windows-1252 (típico de Excel ES
+        cuando se guarda como CSV antiguo).
+      - Delimiter: ';' (Excel ES), ',' (estándar internacional), tab.
+
+    Idempotente por dedup case-insensitive de (source, target).
+    """
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Sube un archivo .csv válido.")
+
+    content = await file.read()
+    # Cascada de encodings probables
+    text: str | None = None
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            text = content.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise HTTPException(status_code=400, detail="No se pudo decodificar el CSV.")
+
+    # Auto-detectar el separador con csv.Sniffer
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+    except csv.Error:
+        # Si Sniffer falla (CSV con una sola columna o muy raro),
+        # caer al estándar internacional como fallback.
+        dialect = csv.excel
+
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(status_code=400, detail="El CSV está vacío o sin header.")
+
+    return glossary_service.import_csv_rows(db, rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════

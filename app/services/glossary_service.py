@@ -57,3 +57,61 @@ def delete_term(db: Session, term_id: int) -> bool:
     db.delete(term)
     db.commit()
     return True
+
+
+def import_csv_rows(db: Session, rows: list[dict]) -> dict:
+    """Importa filas de un CSV parseado al glosario.
+
+    Política:
+      - source y target son obligatorios; rows sin ambos se cuentan en errors.
+      - category default 'término', note default ''.
+      - Deduplicación case-insensitive por (source, target): si ya existe
+        el par, se omite (skipped). Esto hace el import idempotente.
+
+    Returns:
+        {
+          "imported": int,    # filas insertadas
+          "skipped":  int,    # filas omitidas por duplicado
+          "errors":   list[str],  # filas con problema y por qué
+        }
+    """
+    imported = 0
+    skipped  = 0
+    errors:  list[str] = []
+
+    # Pre-cargar el glosario actual a memoria (lower-case) para dedup eficiente
+    existing_pairs = {
+        (t.source.strip().lower(), t.target.strip().lower())
+        for t in list_terms(db)
+    }
+
+    for i, row in enumerate(rows, start=1):
+        source = (row.get("source") or "").strip()
+        target = (row.get("target") or "").strip()
+        if not source or not target:
+            errors.append(f"Fila {i}: 'source' y 'target' son obligatorios")
+            continue
+
+        key = (source.lower(), target.lower())
+        if key in existing_pairs:
+            skipped += 1
+            continue
+
+        category = (row.get("category") or "término").strip() or "término"
+        note     = (row.get("note") or "").strip()
+
+        try:
+            term = GlossaryTerm(
+                source=source,
+                target=target,
+                category=category,
+                note=note,
+            )
+            db.add(term)
+            existing_pairs.add(key)   # evitar duplicados intra-CSV
+            imported += 1
+        except Exception as e:
+            errors.append(f"Fila {i}: {e}")
+
+    db.commit()
+    return {"imported": imported, "skipped": skipped, "errors": errors}
