@@ -35,7 +35,7 @@ async def translate_subtitle(
     cpl: int = Form(38),
     db: Session = Depends(get_db),
 ):
-    """Traduce un .srt y persiste el job y sus cues en SQLite."""
+    """Traduce un .srt con RAG + sliding window, persiste el job y sus cues."""
     if not file.filename.endswith(".srt"):
         raise HTTPException(status_code=400, detail="Sube un archivo .srt válido.")
 
@@ -46,20 +46,37 @@ async def translate_subtitle(
         original_subtitles = srt_service.parse_srt(text_content)
         cues_source = {s.index: s.content for s in original_subtitles}
 
-        # ── Traducción ────────────────────────────────────────────────────
-        result = await translation_service.translate_texts(
-            cues_source,
+        # ── 1. Crear Job pendiente — necesitamos job.id para indexar batch ─
+        job = history_service.create_pending_job(
+            db,
+            filename=file.filename,
             target_lang=target_lang,
+            cpl=cpl,
             context=context,
-            cpl_limit=cpl,
         )
+
+        # ── 2. Traducir con RAG + sliding window activos (modo full) ──────
+        try:
+            result = await translation_service.translate_texts(
+                cues_source,
+                target_lang=target_lang,
+                context=context,
+                cpl_limit=cpl,
+                job_id=job.id,
+                use_rag=True,
+                sliding_window_size=20,
+            )
+        except Exception as e:
+            history_service.fail_job(db, job, str(e))
+            raise
+
         cues_target = result["translations"]
 
-        # ── Reconstruir el SRT respetando timecodes originales ────────────
+        # ── 3. Reconstruir el SRT respetando timecodes originales ─────────
         final_texts = [cues_target.get(s.index, s.content) for s in original_subtitles]
         final_srt_content = srt_service.rebuild_srt(original_subtitles, final_texts)
 
-        # ── Calcular CPL compliance real ──────────────────────────────────
+        # ── 4. Calcular CPL compliance real ───────────────────────────────
         all_lines = []
         for txt in cues_target.values():
             all_lines.extend([ln for ln in txt.split("\n") if ln.strip()])
@@ -67,19 +84,16 @@ async def translate_subtitle(
         n_under = sum(1 for ln in all_lines if len(ln) <= cpl)
         cpl_compliance = round(n_under / n_total * 100, 1)
 
-        # ── Persistir Job + Translations atómicamente ─────────────────────
-        await history_service.save_completed_job(
+        # ── 5. Completar el Job (insertar Translations, status='completed') ─
+        await history_service.complete_job(
             db,
-            filename=file.filename,
-            target_lang=target_lang,
-            cpl=cpl,
-            context=context,
+            job=job,
+            cues_source=cues_source,
+            cues_target=cues_target,
             elapsed_s=result["elapsed_s"],
             cpl_compliance=cpl_compliance,
             tokens_prompt=result["tokens_prompt"],
             tokens_completion=result["tokens_completion"],
-            cues_source=cues_source,
-            cues_target=cues_target,
         )
 
         return Response(
@@ -91,9 +105,12 @@ async def translate_subtitle(
                 "X-Tokens-Prompt":     str(result["tokens_prompt"]),
                 "X-Tokens-Completion": str(result["tokens_completion"]),
                 "X-Elapsed-Seconds":   f"{result['elapsed_s']:.2f}",
+                "X-Job-Id":            str(job.id),
             },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en el servidor: {str(e)}")
 

@@ -45,51 +45,58 @@ def get_job_translations(db: Session, job_id: int) -> List[Translation]:
 
 # ── Escritura ─────────────────────────────────────────────────────────────
 
-async def save_completed_job(
+def create_pending_job(
     db: Session,
     *,
     filename: str,
     target_lang: str,
     cpl: int,
     context: str,
+) -> Job:
+    """Crea un Job en estado 'running' antes de empezar a traducir.
+
+    Retorna el job ya con id asignado, para que translate_texts pueda usarlo
+    como clave estable en ChromaDB durante la indexación per-batch.
+    """
+    job = Job(
+        filename=filename,
+        target_lang=target_lang,
+        cpl=cpl,
+        context=context,
+        status="running",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    logger.info("Job %d creado en estado 'running' (%s)", job.id, filename)
+    return job
+
+
+async def complete_job(
+    db: Session,
+    *,
+    job: Job,
+    cues_source: Dict[int, str],
+    cues_target: Dict[int, str],
     elapsed_s: float,
     cpl_compliance: float,
     tokens_prompt: int,
     tokens_completion: int,
-    cues_source: Dict[int, str],
-    cues_target: Dict[int, str],
-    status: str = "completed",
-    error: str = "",
 ) -> Job:
+    """Completa un Job pendiente: inserta sus Translations, actualiza
+    métricas y cambia status a 'completed'. Indexación ChromaDB ya
+    debería estar hecha batch a batch desde translate_texts; aquí
+    re-indexamos como safety net (upsert idempotente).
     """
-    Crea un Job + todas sus Translations en una sola transacción SQLite,
-    y luego indexa los pares (source_text, target_text) en ChromaDB para
-    retrieval futuro.
-
-    Política de errores:
-      - SQLite: all-or-nothing (rollback si falla cualquier paso del INSERT).
-      - ChromaDB (hook): best-effort. Si la indexación falla, se loguea pero
-        NO se hace rollback de SQLite — la traducción ya está completada y
-        devuelta al usuario; perderla por un fallo del lado RAG sería peor
-        que dejar el job sin indexar (recuperable con un backfill).
-    """
-    # ── 1. Persistencia SQLite (transaccional) ───────────────────────────
     try:
-        job = Job(
-            filename=filename,
-            target_lang=target_lang,
-            cpl=cpl,
-            context=context,
-            elapsed_s=elapsed_s,
-            cpl_compliance=cpl_compliance,
-            tokens_prompt=tokens_prompt,
-            tokens_completion=tokens_completion,
-            status=status,
-            error=error,
-        )
-        db.add(job)
-        db.flush()   # asigna job.id sin commit todavía
+        # Actualizar métricas en el Job
+        job.elapsed_s         = elapsed_s
+        job.cpl_compliance    = cpl_compliance
+        job.tokens_prompt     = tokens_prompt
+        job.tokens_completion = tokens_completion
+        job.status            = "completed"
 
+        # Insertar Translations
         for cue_idx, src_text in cues_source.items():
             tr = Translation(
                 job_id=job.id,
@@ -106,30 +113,38 @@ async def save_completed_job(
         db.rollback()
         raise
 
-    # ── 2. Hook RAG: indexar en ChromaDB (best-effort, no bloquea) ───────
-    if status == "completed":
-        try:
-            translations_for_index = [
-                {
-                    "id":          t.id,
-                    "cue_idx":     t.cue_idx,
-                    "source_text": t.source_text,
-                    "target_text": t.target_text,
-                    "target_lang": job.target_lang,
-                }
-                for t in job.translations
-            ]
-            n = await rag_service.add_translations(
-                job_id=job.id,
-                translations=translations_for_index,
-            )
-            logger.info("Job %d · indexadas %d translations en ChromaDB", job.id, n)
-        except Exception as e:
-            logger.warning(
-                "Job %d · fallo indexando en ChromaDB (no bloqueante): %s",
-                job.id, e,
-            )
+    # Safety net: re-indexar en ChromaDB. Idempotente por composite ID.
+    try:
+        translations_for_index = [
+            {
+                "cue_idx":     t.cue_idx,
+                "source_text": t.source_text,
+                "target_text": t.target_text,
+                "target_lang": job.target_lang,
+            }
+            for t in job.translations
+        ]
+        n = await rag_service.add_translations(
+            job_id=job.id,
+            translations=translations_for_index,
+        )
+        logger.info("Job %d · re-indexación safety: %d translations", job.id, n)
+    except Exception as e:
+        logger.warning(
+            "Job %d · re-indexación safety falló (no bloqueante): %s",
+            job.id, e,
+        )
 
+    return job
+
+
+def fail_job(db: Session, job: Job, error: str) -> Job:
+    """Marca un job pendiente como 'failed'. Sin Translations ni RAG."""
+    job.status = "failed"
+    job.error  = error
+    db.commit()
+    db.refresh(job)
+    logger.warning("Job %d marcado como 'failed': %s", job.id, error[:80])
     return job
 
 
