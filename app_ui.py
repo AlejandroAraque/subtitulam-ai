@@ -90,6 +90,40 @@ def api_delete_job(job_id: int) -> bool:
         return False
 
 
+def api_export_glossary_csv() -> Optional[bytes]:
+    """Descarga el glosario completo como bytes CSV. None si el backend falla."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/glossary/export.csv", timeout=15)
+        r.raise_for_status()
+        return r.content
+    except requests.exceptions.RequestException:
+        return None
+
+
+def api_import_glossary_csv(filename: str, file_bytes: bytes) -> dict:
+    """Sube un CSV al backend. Devuelve dict:
+        - {'ok': True, 'imported': N, 'skipped': M, 'errors': [...]}
+        - {'ok': False, 'detail': mensaje}
+    No pinta nada en pantalla; eso es responsabilidad del caller.
+    """
+    try:
+        r = requests.post(
+            f"{BACKEND_URL}/glossary/import",
+            files={"file": (filename, file_bytes, "text/csv")},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return {"ok": True, **r.json()}
+    except requests.exceptions.HTTPError as e:
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        return {"ok": False, "detail": detail}
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "detail": str(e)}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════
@@ -761,6 +795,107 @@ def render_glosario():
                 api_get_glossary.clear()   # invalidar cache para refrescar a vacío
                 st.toast("Glosario vaciado.", icon="🗑")
                 st.rerun()
+
+    # ── Sección Importar / Exportar CSV ───────────────────────────────────
+    st.markdown('<div style="height:24px;"></div>', unsafe_allow_html=True)
+    section_label("Importar / Exportar CSV")
+
+    col_dl, col_up = st.columns(2, gap="medium")
+
+    # Descarga ───────────────────────────────────
+    with col_dl:
+        st.markdown(
+            '<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">'
+            'Descargar glosario actual'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        csv_bytes = api_export_glossary_csv() or b""
+        st.download_button(
+            label=f"⬇  glossary.csv ({len(glossary)} términos)",
+            data=csv_bytes,
+            file_name="glossary.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=(len(glossary) == 0),
+        )
+        st.markdown(
+            '<div style="font-size:11.5px;color:var(--text-4);margin-top:6px;">'
+            'Compatible con Excel. Edita las filas que quieras y vuelve a subir el archivo.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Subida ─────────────────────────────────────
+    with col_up:
+        st.markdown(
+            '<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">'
+            'Subir CSV con términos'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        csv_file = st.file_uploader(
+            "csv",
+            type=["csv"],
+            label_visibility="collapsed",
+            key="csv_glossary_up",
+        )
+        if csv_file is not None:
+            sz = csv_file.size
+            sz_str = f"{sz/1024:.1f} KB" if sz < 1_048_576 else f"{sz/1_048_576:.1f} MB"
+            st.markdown(
+                f'<div class="file-pill"><div class="fp-dot-gray"></div>'
+                f'<div class="fp-name">{csv_file.name}</div>'
+                f'<div class="fp-size">{sz_str}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+        if st.button(
+            "+  Importar al glosario",
+            disabled=(csv_file is None),
+            use_container_width=True,
+            key="btn_import_csv",
+        ):
+            result = api_import_glossary_csv(csv_file.name, csv_file.getvalue())
+            api_get_glossary.clear()   # refrescar caché tras inserción
+            st.session_state["glossary_import_result"] = result
+            st.rerun()
+
+    # Banner con el resultado del último import (si existe)
+    res = st.session_state.get("glossary_import_result")
+    if res:
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+        if res.get("ok"):
+            n_imp = res.get("imported", 0)
+            n_sk  = res.get("skipped", 0)
+            errs  = res.get("errors", []) or []
+            if errs:
+                err_html = "<br>".join(escape(e) for e in errs[:6])
+                if len(errs) > 6:
+                    err_html += f"<br>… y {len(errs)-6} más"
+                banner(
+                    "warn",
+                    f"Importados {n_imp} · omitidos {n_sk} · {len(errs)} fila(s) con error",
+                    body_html=err_html,
+                )
+            elif n_imp > 0:
+                banner(
+                    "ok",
+                    f"Importados {n_imp} términos nuevos",
+                    body=f"Se omitieron {n_sk} duplicados ya existentes."
+                         if n_sk else "Sin duplicados detectados.",
+                )
+            else:
+                banner(
+                    "warn",
+                    "Sin términos nuevos",
+                    body=f"Las {n_sk} filas ya estaban en el glosario.",
+                )
+        else:
+            banner("err", "Error al importar", body=res.get("detail", "Sin detalle."))
+        # Una sola visualización: limpiar al renderizar
+        del st.session_state["glossary_import_result"]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · HISTORIAL
