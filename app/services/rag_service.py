@@ -67,17 +67,20 @@ def get_collection():
 async def add_translations(
     job_id: int,
     translations: list[dict[str, Any]],
+    *,
+    filename: str = "",
 ) -> int:
     """Embebe e indexa una lista de translations de un job.
 
     Args:
         job_id: id del Job al que pertenecen.
         translations: lista de dicts con al menos:
-            - id           (int, id de la fila en SQLite)
             - cue_idx      (int)
             - source_text  (str)
             - target_text  (str)
         Pueden incluir extras (target_lang, etc.) que se guardarán en metadata.
+        filename: nombre del archivo SRT origen. Se guarda en la metadata
+            de cada vector para permitir filtrado por película/serie.
 
     Returns:
         Número de translations indexadas.
@@ -100,6 +103,7 @@ async def add_translations(
             "cue_idx":     t["cue_idx"],
             "target_text": t["target_text"],
             "target_lang": t.get("target_lang", "es"),
+            "filename":    filename or t.get("filename", ""),
         }
         for t in translations
     ]

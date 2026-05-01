@@ -127,6 +127,7 @@ async def complete_job(
         n = await rag_service.add_translations(
             job_id=job.id,
             translations=translations_for_index,
+            filename=job.filename,
         )
         logger.info("Job %d · re-indexación safety: %d translations", job.id, n)
     except Exception as e:

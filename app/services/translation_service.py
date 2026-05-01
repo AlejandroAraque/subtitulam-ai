@@ -43,6 +43,12 @@ Tu objetivo es producir subtítulos naturales, concisos y fáciles de leer.
 INSTRUCCIONES OBLIGATORIAS:
 1. Economía del lenguaje: Sé conciso, elimina relleno.
 2. Naturalidad: "I guess we should get going" → "Supongo que deberíamos ir tirando".
+   Evita literalismos del inglés:
+   - Pronombres redundantes: "What's with her?" → "¿Qué le pasa?" (NO "¿Qué le pasa a ella?").
+     El "le/la/lo" ya implica tercera persona; añadir "a ella/él" sobra salvo desambiguación.
+   - Posesivos donde el contexto basta: "He raised his hand" → "Levantó la mano" (NO "su mano").
+   - Voz pasiva literal: "It is said that" → "Se dice que" o "Dicen que" (NO "Es dicho que").
+   - "Make + infinitivo" → subjuntivo: "Make her come" → "Que venga" (NO "Hacerla venir").
 3. Adaptación cultural: No traduzcas literal. "He hit the nail on the head" → "Ha dado en el clavo".
 4. Segmentación: Máximo 2 líneas, divididas por pausas naturales.
 5. Elipsis del verbo copulativo (CRÍTICO): En español SIEMPRE debe aparecer el verbo "ser" o "estar". "Not necessary" → "No es necesario".
@@ -50,12 +56,15 @@ INSTRUCCIONES OBLIGATORIAS:
    - "I <i>knew</i> you'd come through" → "<i>Sabía</i> que no me fallarías".
    - Si la etiqueta envuelve una palabra con énfasis, tradúcela manteniendo el énfasis donde cae naturalmente en destino.
 7. NO TRADUZCAS: nombres propios de personas, marcas comerciales, topónimos consolidados (Starbucks, Penn Station, Mr. O'Brien) ni acrónimos técnicos (firewall, server).
-8. COHERENCIA NARRATIVA (si el usuario incluye los bloques opcionales más abajo):
-   - "EJEMPLOS PREVIOS" o "CONTEXTO RECIENTE" muestran traducciones ya hechas.
-   - Mantén las MISMAS elecciones léxicas para términos repetidos (si "bank"
-     se tradujo como "banco" antes, no uses "orilla" ahora).
+8. COHERENCIA NARRATIVA (si recibes "EJEMPLOS PREVIOS" o "CONTEXTO RECIENTE" en el user message):
+   - Los ejemplos son referencia LÉXICA, no plantilla sintáctica.
+   - SÍ copia las elecciones de vocabulario clave: si "bank" se tradujo "banco",
+     úsalo igual. Si "Walter" no se tradujo, no lo traduzcas.
+   - NO copies la estructura gramatical de los ejemplos: cada cue tiene su
+     propia naturalidad. Si un ejemplo dice "le pasa a ella", no significa
+     que tu cue debe usar también "a ella".
    - Mantén nombres propios IDÉNTICOS (sin variantes de género/acento).
-   - Mantén el mismo registro y tono entre cues consecutivos del mismo personaje.
+   - Mantén el registro y tono coherentes entre cues consecutivos del mismo personaje.
 9. Formato ESTRICTO de salida:
    - Inicia cada bloque con el número recibido seguido de dos puntos.
    - Ejemplo:
@@ -173,6 +182,7 @@ async def translate_texts(
     cpl_limit: int = 38,
     *,
     job_id: int | None = None,
+    filename: str = "",
     use_rag: bool = True,
     sliding_window_size: int = 20,
     rag_top_k: int = 3,
@@ -291,7 +301,9 @@ async def translate_texts(
                 ]
                 if to_index:
                     try:
-                        await rag_service.add_translations(job_id, to_index)
+                        await rag_service.add_translations(
+                            job_id, to_index, filename=filename
+                        )
                     except Exception as e:
                         logger.warning(
                             "RAG indexación falló en %s (no bloqueante): %s",
