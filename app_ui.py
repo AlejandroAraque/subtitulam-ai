@@ -467,6 +467,59 @@ div[data-baseweb="select"]>div{
 
 /* ── spinner color ─────────────────────── */
 .stSpinner>div{border-top-color:var(--text)!important;}
+
+/* ── GLOSARIO (v2.4.1 — SaaS layout) ───── */
+.gl-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 0 16px;}
+.gl-stat{background:var(--surface);border:1px solid var(--line-2);border-radius:10px;padding:14px 16px;box-shadow:var(--shadow-2);}
+.gl-stat .v{font-size:22px;font-weight:700;color:var(--text);line-height:1;letter-spacing:-.4px;}
+.gl-stat .l{font-size:10.5px;color:var(--text-4);text-transform:uppercase;letter-spacing:.07em;margin-top:6px;font-weight:500;}
+
+.gl-info{display:flex;gap:12px;align-items:flex-start;background:var(--info-bg);border:1px solid var(--info-br);border-radius:10px;padding:12px 14px;margin:0 0 22px;}
+.gl-info .ico{width:22px;height:22px;border-radius:99px;background:var(--info-fg);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:Georgia,serif;font-style:italic;margin-top:1px;}
+.gl-info .t{font-size:13px;font-weight:600;color:var(--info-fg);}
+.gl-info .s{font-size:12.5px;color:var(--info-fg-2);margin-top:3px;line-height:1.55;}
+
+/* Cabecera de la tabla: grid de 5 columnas alineado con el st.columns de las filas */
+.gl-thead-grid{
+  display:grid;
+  grid-template-columns:1.1fr 1.1fr 0.9fr 1.7fr 0.7fr;
+  gap:14px;
+  padding:10px 4px;
+  color:var(--text-3);
+  font-size:10.5px;
+  font-weight:500;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  border-bottom:1px solid var(--line);
+  margin-top:6px;
+}
+
+/* Marcador para que las filas siguientes se compacten y separen tipo tabla */
+.gl-rows-marker{display:none;}
+[data-testid="stElementContainer"]:has(>.gl-rows-marker) ~ [data-testid="stElementContainer"]:has(>[data-testid="stHorizontalBlock"]){
+  margin-top:0!important;
+  margin-bottom:0!important;
+}
+[data-testid="stElementContainer"]:has(>.gl-rows-marker) ~ [data-testid="stElementContainer"]:has(>[data-testid="stHorizontalBlock"])>[data-testid="stHorizontalBlock"]{
+  border-bottom:1px solid var(--line-2);
+  padding:8px 4px;
+}
+[data-testid="stElementContainer"]:has(>.gl-rows-marker) ~ [data-testid="stElementContainer"]:has(>[data-testid="stHorizontalBlock"]):hover>[data-testid="stHorizontalBlock"]{
+  background:var(--surface-2);
+}
+
+/* Tipografía de las celdas */
+.gl-source{font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.8px;}
+.gl-target{color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.8px;}
+.gl-note{color:var(--text-4);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+.gl-badge{display:inline-flex;align-items:center;padding:3px 9px;font-size:11px;font-weight:500;border-radius:99px;letter-spacing:.01em;}
+.gl-badge.b-prop {background:#dbeafe;color:#1e40af;}
+.gl-badge.b-term {background:#e5e7eb;color:#4b5563;}
+.gl-badge.b-marca{background:#ede9fe;color:#6d28d9;}
+.gl-badge.b-acro {background:#cffafe;color:#155e75;}
+.gl-badge.b-idiom{background:#fed7aa;color:#c2410c;}
+.gl-badge.b-slang{background:#fce7f3;color:#9f1239;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -751,136 +804,146 @@ def render_workspace():
         )
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PÁGINA · GLOSARIO
+# PÁGINA · GLOSARIO  (v2.4.1 — layout SaaS con modales)
 # ═══════════════════════════════════════════════════════════════════════════
-def render_glosario():
-    page_header(
-        "Glosario y Reglas RAG",
-        "Términos y traducciones fijas que la IA aplicará como contexto vectorial.",
-    )
+_GL_CATEGORIES = ["nombre-propio", "marca", "acrónimo", "slang", "idiom", "término"]
 
-    # ── Lectura desde la API en cada render (fuente de verdad: SQLite) ──
-    glossary = api_get_glossary()
+# Mapeo de category → clase CSS ASCII-safe para el badge.
+_CAT_BADGE = {
+    "nombre-propio": "b-prop",
+    "marca":         "b-marca",
+    "acrónimo":      "b-acro",
+    "slang":         "b-slang",
+    "idiom":         "b-idiom",
+    "término":       "b-term",
+}
 
-    col_form, col_table = st.columns([1, 1.5], gap="large")
 
-    with col_form:
-        with st.form("add_rule", clear_on_submit=True):
-            st.markdown('<div class="fcard-title">Nueva regla</div>', unsafe_allow_html=True)
-            term  = st.text_input("Término original",       placeholder="Ej: Walter White")
-            trans = st.text_input("Traducción obligatoria", placeholder="Ej: Walter White")
-            ctx   = st.text_area ("Contexto de uso", placeholder="Ej: No traducir, nombre propio del protagonista.", height=80)
-            tag   = st.selectbox ("Etiqueta", ["nombre-propio", "marca", "acrónimo", "slang", "idiom", "término"])
+# ── Modales (st.dialog requiere registro a nivel de módulo) ────────────────
+@st.dialog("Añadir término al glosario")
+def _dialog_add_term():
+    with st.form("dlg_add_term", clear_on_submit=True):
+        source = st.text_input("Término original",       placeholder="Ej: Walter White")
+        target = st.text_input("Traducción obligatoria", placeholder="Ej: Walter White")
+        note   = st.text_area ("Contexto de uso (opcional)",
+                               placeholder="Ej: No traducir, nombre propio del protagonista.",
+                               height=90)
+        cat    = st.selectbox ("Etiqueta", _GL_CATEGORIES)
+        c1, c2 = st.columns(2)
+        cancel = c1.form_submit_button("Cancelar", type="secondary", use_container_width=True)
+        save   = c2.form_submit_button("Añadir término",                use_container_width=True)
 
-            if st.form_submit_button("+ Añadir regla", use_container_width=True):
-                if term.strip() and trans.strip():
-                    created = api_post_glossary(
-                        source=term.strip(),
-                        target=trans.strip(),
-                        category=tag,
-                        note=ctx.strip(),
-                    )
-                    if created is not None:
-                        api_get_glossary.clear()   # invalidar cache para ver el nuevo término
-                        st.toast(f'Añadido: {created["source"]} → {created["target"]}', icon="✅")
-                        st.rerun()
-                else:
-                    st.error("Término y Traducción son obligatorios.")
-
-    with col_table:
-        n = len(glossary)
-        section_label("Reglas activas", right=f'<span class="mono" style="color:var(--text-4);font-size:12px;">{n} reglas</span>')
-        if n == 0:
-            empty_state("📖", "Sin reglas todavía",
-                        "Añade términos desde el formulario. La IA los aplicará como contexto vectorial en cada traducción.")
-        else:
-            # Renombrar campos al render para mantener la UI en español.
-            df = pd.DataFrame(glossary).rename(columns={
-                "source":   "Término",
-                "target":   "Traducción",
-                "note":     "Contexto",
-                "category": "Etiqueta",
-            })
-            df = df[["Término", "Traducción", "Contexto", "Etiqueta"]]
-            st.dataframe(df, hide_index=True, use_container_width=True,
-                         height=min(58 + n * 38, 460))
-            st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
-            if st.button("Limpiar glosario", type="secondary", use_container_width=True):
-                for term in glossary:
-                    api_delete_glossary(term["id"])
-                api_get_glossary.clear()   # invalidar cache para refrescar a vacío
-                st.toast("Glosario vaciado.", icon="🗑")
-                st.rerun()
-
-    # ── Sección Importar / Exportar CSV ───────────────────────────────────
-    st.markdown('<div style="height:24px;"></div>', unsafe_allow_html=True)
-    section_label("Importar / Exportar CSV")
-
-    col_dl, col_up = st.columns(2, gap="medium")
-
-    # Descarga ───────────────────────────────────
-    with col_dl:
-        st.markdown(
-            '<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">'
-            'Descargar glosario actual'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        csv_bytes = _build_glossary_csv(glossary)
-        st.download_button(
-            label=f"⬇  glossary.csv ({len(glossary)} términos)",
-            data=csv_bytes,
-            file_name="glossary.csv",
-            mime="text/csv",
-            use_container_width=True,
-            disabled=(len(glossary) == 0),
-        )
-        st.markdown(
-            '<div style="font-size:11.5px;color:var(--text-4);margin-top:6px;">'
-            'Compatible con Excel. Edita las filas que quieras y vuelve a subir el archivo.'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    # Subida ─────────────────────────────────────
-    with col_up:
-        st.markdown(
-            '<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">'
-            'Subir CSV con términos'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        csv_file = st.file_uploader(
-            "csv",
-            type=["csv"],
-            label_visibility="collapsed",
-            key="csv_glossary_up",
-        )
-        if csv_file is not None:
-            sz = csv_file.size
-            sz_str = f"{sz/1024:.1f} KB" if sz < 1_048_576 else f"{sz/1_048_576:.1f} MB"
-            st.markdown(
-                f'<div class="file-pill"><div class="fp-dot-gray"></div>'
-                f'<div class="fp-name">{csv_file.name}</div>'
-                f'<div class="fp-size">{sz_str}</div></div>',
-                unsafe_allow_html=True,
-            )
-
-        if st.button(
-            "+  Importar al glosario",
-            disabled=(csv_file is None),
-            use_container_width=True,
-            key="btn_import_csv",
-        ):
-            result = api_import_glossary_csv(csv_file.name, csv_file.getvalue())
-            api_get_glossary.clear()   # refrescar caché tras inserción
-            st.session_state["glossary_import_result"] = result
+    if cancel:
+        st.rerun()
+    if save:
+        if not source.strip() or not target.strip():
+            st.error("Término y Traducción son obligatorios.")
+            return
+        created = api_post_glossary(source.strip(), target.strip(), cat, note.strip())
+        if created is not None:
+            api_get_glossary.clear()
+            st.toast(f'Añadido: {created["source"]} → {created["target"]}', icon="✅")
             st.rerun()
 
-    # Banner con el resultado del último import (si existe)
-    res = st.session_state.get("glossary_import_result")
+
+@st.dialog("Editar término")
+def _dialog_edit_term(existing: dict):
+    cat_now = existing.get("category", "término")
+    cat_idx = _GL_CATEGORIES.index(cat_now) if cat_now in _GL_CATEGORIES else len(_GL_CATEGORIES) - 1
+
+    with st.form(f"dlg_edit_term_{existing['id']}"):
+        source = st.text_input("Término original",       value=existing.get("source", ""))
+        target = st.text_input("Traducción obligatoria", value=existing.get("target", ""))
+        note   = st.text_area ("Contexto de uso", value=existing.get("note", "") or "", height=90)
+        cat    = st.selectbox ("Etiqueta", _GL_CATEGORIES, index=cat_idx)
+        c1, c2 = st.columns(2)
+        cancel = c1.form_submit_button("Cancelar", type="secondary", use_container_width=True)
+        save   = c2.form_submit_button("Guardar cambios",                use_container_width=True)
+
+    if cancel:
+        st.rerun()
+    if save:
+        if not source.strip() or not target.strip():
+            st.error("Término y Traducción son obligatorios.")
+            return
+        # El backend no expone PUT — borrar y recrear es atómico a nivel UX.
+        if api_delete_glossary(existing["id"]):
+            created = api_post_glossary(source.strip(), target.strip(), cat, note.strip())
+            if created is not None:
+                api_get_glossary.clear()
+                st.toast(f'Actualizado: {created["source"]} → {created["target"]}', icon="✅")
+                st.rerun()
+
+
+@st.dialog("Importar / exportar CSV")
+def _dialog_csv(glossary: list[dict]):
+    st.markdown(
+        '<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">'
+        'Descargar glosario actual</div>',
+        unsafe_allow_html=True,
+    )
+    csv_bytes = _build_glossary_csv(glossary)
+    st.download_button(
+        label=f"⬇  glossary.csv ({len(glossary)} términos)",
+        data=csv_bytes,
+        file_name="glossary.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=(len(glossary) == 0),
+        key="dlg_csv_dl",
+    )
+    st.markdown(
+        '<div style="font-size:11.5px;color:var(--text-4);margin:6px 0 18px;">'
+        'Compatible con Excel (UTF-8 + ;). Edita las filas y vuelve a subir el archivo.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">'
+        'Subir CSV con términos</div>',
+        unsafe_allow_html=True,
+    )
+    csv_file = st.file_uploader("csv", type=["csv"], label_visibility="collapsed",
+                                key="dlg_csv_upload")
+
+    c1, c2 = st.columns(2)
+    if c1.button("Cerrar", type="secondary", use_container_width=True, key="dlg_csv_close"):
+        st.rerun()
+    if c2.button("Importar al glosario",
+                 disabled=(csv_file is None),
+                 use_container_width=True,
+                 key="dlg_csv_import"):
+        result = api_import_glossary_csv(csv_file.name, csv_file.getvalue())
+        api_get_glossary.clear()
+        st.session_state["glossary_import_result"] = result
+        st.rerun()
+
+
+def render_glosario():
+    glossary = api_get_glossary()
+    n = len(glossary)
+
+    # ── HEADER con acciones a la derecha ───────────────────────────────
+    head_l, head_r = st.columns([3, 1.4], gap="small")
+    with head_l:
+        st.markdown("""
+        <div style="margin-bottom:24px;padding-bottom:18px;border-bottom:1px solid var(--line-2);">
+          <h1 class="ph-t">Glosario y reglas RAG</h1>
+          <p class="ph-s">Términos con traducción fija. La IA los aplicará como contexto prioritario, por encima de los ejemplos vectoriales.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    with head_r:
+        st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+        b1, b2 = st.columns(2, gap="small")
+        if b1.button("+ Añadir", use_container_width=True, key="gl_btn_add"):
+            _dialog_add_term()
+        if b2.button("⇅ CSV", type="secondary", use_container_width=True, key="gl_btn_csv"):
+            _dialog_csv(glossary)
+
+    # ── Banner del último import (si existe), de un solo uso ───────────
+    res = st.session_state.pop("glossary_import_result", None)
     if res:
-        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
         if res.get("ok"):
             n_imp = res.get("imported", 0)
             n_sk  = res.get("skipped", 0)
@@ -889,28 +952,133 @@ def render_glosario():
                 err_html = "<br>".join(escape(e) for e in errs[:6])
                 if len(errs) > 6:
                     err_html += f"<br>… y {len(errs)-6} más"
-                banner(
-                    "warn",
-                    f"Importados {n_imp} · omitidos {n_sk} · {len(errs)} fila(s) con error",
-                    body_html=err_html,
-                )
+                banner("warn",
+                       f"Importados {n_imp} · omitidos {n_sk} · {len(errs)} fila(s) con error",
+                       body_html=err_html)
             elif n_imp > 0:
-                banner(
-                    "ok",
-                    f"Importados {n_imp} términos nuevos",
-                    body=f"Se omitieron {n_sk} duplicados ya existentes."
-                         if n_sk else "Sin duplicados detectados.",
-                )
+                banner("ok", f"Importados {n_imp} términos nuevos",
+                       body=f"Se omitieron {n_sk} duplicados ya existentes."
+                            if n_sk else "Sin duplicados detectados.")
             else:
-                banner(
-                    "warn",
-                    "Sin términos nuevos",
-                    body=f"Las {n_sk} filas ya estaban en el glosario.",
-                )
+                banner("warn", "Sin términos nuevos",
+                       body=f"Las {n_sk} filas ya estaban en el glosario.")
         else:
             banner("err", "Error al importar", body=res.get("detail", "Sin detalle."))
-        # Una sola visualización: limpiar al renderizar
-        del st.session_state["glossary_import_result"]
+
+    # ── STATS (4 tarjetas) ─────────────────────────────────────────────
+    n_propio = sum(1 for t in glossary if t.get("category") == "nombre-propio")
+    n_term   = sum(1 for t in glossary if t.get("category") == "término")
+    n_idiom  = sum(1 for t in glossary if t.get("category") in ("idiom", "slang"))
+    st.markdown(f"""
+    <div class="gl-stats">
+      <div class="gl-stat"><div class="v">{n}</div><div class="l">Términos totales</div></div>
+      <div class="gl-stat"><div class="v">{n_propio}</div><div class="l">Nombres propios</div></div>
+      <div class="gl-stat"><div class="v">{n_term}</div><div class="l">Términos generales</div></div>
+      <div class="gl-stat"><div class="v">{n_idiom}</div><div class="l">Idioms y slang</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── INFO BOX (cómo se usa) ─────────────────────────────────────────
+    st.markdown("""
+    <div class="gl-info">
+      <div class="ico">i</div>
+      <div>
+        <div class="t">Cómo se usa en la traducción</div>
+        <div class="s">Cada término se inyecta como regla obligatoria en el system prompt antes de cada batch. La IA debe respetarlo aunque RAG sugiera otra cosa — el glosario tiene prioridad sobre los ejemplos vectoriales.</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if n == 0:
+        empty_state("📖", "Glosario vacío",
+                    "Añade tu primer término con “+ Añadir” o importa un CSV existente.")
+        return
+
+    # ── FILTROS ────────────────────────────────────────────────────────
+    f1, f2 = st.columns([3, 1.4], gap="medium")
+    with f1:
+        q = st.text_input("Buscar",
+                          placeholder="🔍   Buscar término, traducción o contexto…",
+                          key="gl_search", label_visibility="collapsed")
+    with f2:
+        cat_filter = st.selectbox("Etiqueta", ["Todas las etiquetas"] + _GL_CATEGORIES,
+                                  key="gl_cat_filter", label_visibility="collapsed")
+
+    filtered = glossary
+    if q.strip():
+        ql = q.strip().lower()
+        filtered = [t for t in filtered if (
+            ql in (t.get("source","") or "").lower()
+            or ql in (t.get("target","") or "").lower()
+            or ql in (t.get("note","") or "").lower()
+        )]
+    if cat_filter != "Todas las etiquetas":
+        filtered = [t for t in filtered if t.get("category") == cat_filter]
+
+    # ── Encabezado de la tabla con conteo ──────────────────────────────
+    st.markdown(
+        f'<div class="sl-row" style="margin-top:14px;">'
+        f'<div class="sl">Reglas activas</div>'
+        f'<span class="mono" style="color:var(--text-4);font-size:12px;">'
+        f'{len(filtered)} de {n}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not filtered:
+        empty_state("🔎", "Sin resultados",
+                    "Cambia el filtro o borra la búsqueda.")
+        return
+
+    # ── TABLA: header HTML + filas con botones por fila ───────────────
+    st.markdown("""
+    <div class="gl-thead-grid">
+      <div>Término</div>
+      <div>Traducción</div>
+      <div>Etiqueta</div>
+      <div>Contexto</div>
+      <div style="text-align:right;">Acciones</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="gl-rows-marker"></div>', unsafe_allow_html=True)
+    for t in filtered:
+        cat = t.get("category") or "término"
+        badge_cls = _CAT_BADGE.get(cat, "b-term")
+        note = (t.get("note") or "").strip()
+        note_short = (note[:80] + "…") if len(note) > 80 else note
+
+        c_src, c_tgt, c_cat, c_note, c_e, c_d = st.columns(
+            [1.1, 1.1, 0.9, 1.7, 0.35, 0.35],
+            gap="small",
+            vertical_alignment="center",
+        )
+        c_src.markdown(
+            f'<div class="gl-source">{escape(t.get("source",""))}</div>',
+            unsafe_allow_html=True,
+        )
+        c_tgt.markdown(
+            f'<div class="gl-target">{escape(t.get("target",""))}</div>',
+            unsafe_allow_html=True,
+        )
+        c_cat.markdown(
+            f'<span class="gl-badge {badge_cls}">{escape(cat)}</span>',
+            unsafe_allow_html=True,
+        )
+        c_note.markdown(
+            f'<div class="gl-note" title="{escape(note)}">'
+            f'{escape(note_short) if note_short else "—"}</div>',
+            unsafe_allow_html=True,
+        )
+        if c_e.button("✏️", key=f"gl_edit_{t['id']}",
+                      help="Editar término", use_container_width=True):
+            _dialog_edit_term(t)
+        if c_d.button("🗑️", key=f"gl_del_{t['id']}",
+                      help="Borrar término", use_container_width=True):
+            if api_delete_glossary(t["id"]):
+                api_get_glossary.clear()
+                st.toast("Término borrado.", icon="🗑")
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
