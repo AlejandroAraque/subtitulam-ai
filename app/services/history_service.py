@@ -1,14 +1,24 @@
 """
 Capa de servicio del histórico — persistencia atómica de Jobs y sus
-Translations. Esta capa es el punto de extensión para v2 (RAG):
-cuando indexemos en ChromaDB, lo haremos aquí, sin tocar los endpoints.
+Translations + indexación en ChromaDB para retrieval futuro (v2.2+).
 """
+import logging
 from typing import Dict, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.schemas import Job, Translation
+from app.services import rag_service
+
+logger = logging.getLogger("subtitulam.history")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s · %(levelname)s · %(message)s", "%H:%M:%S"
+    ))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
 
 
 # ── Lectura ───────────────────────────────────────────────────────────────
@@ -35,7 +45,7 @@ def get_job_translations(db: Session, job_id: int) -> List[Translation]:
 
 # ── Escritura ─────────────────────────────────────────────────────────────
 
-def save_completed_job(
+async def save_completed_job(
     db: Session,
     *,
     filename: str,
@@ -52,12 +62,18 @@ def save_completed_job(
     error: str = "",
 ) -> Job:
     """
-    Crea un Job y todas sus Translations en una sola transacción.
-    All-or-nothing: si algo falla, rollback completo.
+    Crea un Job + todas sus Translations en una sola transacción SQLite,
+    y luego indexa los pares (source_text, target_text) en ChromaDB para
+    retrieval futuro.
 
-    cues_source / cues_target: diccionarios {cue_idx: texto}.
-    El servicio crea una Translation por cada índice presente en cues_source.
+    Política de errores:
+      - SQLite: all-or-nothing (rollback si falla cualquier paso del INSERT).
+      - ChromaDB (hook): best-effort. Si la indexación falla, se loguea pero
+        NO se hace rollback de SQLite — la traducción ya está completada y
+        devuelta al usuario; perderla por un fallo del lado RAG sería peor
+        que dejar el job sin indexar (recuperable con un backfill).
     """
+    # ── 1. Persistencia SQLite (transaccional) ───────────────────────────
     try:
         job = Job(
             filename=filename,
@@ -83,17 +99,38 @@ def save_completed_job(
             )
             db.add(tr)
 
-        # PUNTO DE EXTENSIÓN PARA v2 (RAG):
-        # aquí indexaremos cada (source_text, target_text) en ChromaDB
-        # antes del commit. Si falla la indexación, rollback de todo.
-
         db.commit()
         db.refresh(job)
-        return job
 
     except Exception:
         db.rollback()
         raise
+
+    # ── 2. Hook RAG: indexar en ChromaDB (best-effort, no bloquea) ───────
+    if status == "completed":
+        try:
+            translations_for_index = [
+                {
+                    "id":          t.id,
+                    "cue_idx":     t.cue_idx,
+                    "source_text": t.source_text,
+                    "target_text": t.target_text,
+                    "target_lang": job.target_lang,
+                }
+                for t in job.translations
+            ]
+            n = await rag_service.add_translations(
+                job_id=job.id,
+                translations=translations_for_index,
+            )
+            logger.info("Job %d · indexadas %d translations en ChromaDB", job.id, n)
+        except Exception as e:
+            logger.warning(
+                "Job %d · fallo indexando en ChromaDB (no bloqueante): %s",
+                job.id, e,
+            )
+
+    return job
 
 
 def delete_job(db: Session, job_id: int) -> bool:

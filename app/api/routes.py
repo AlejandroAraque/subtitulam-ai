@@ -68,7 +68,7 @@ async def translate_subtitle(
         cpl_compliance = round(n_under / n_total * 100, 1)
 
         # ── Persistir Job + Translations atómicamente ─────────────────────
-        history_service.save_completed_job(
+        await history_service.save_completed_job(
             db,
             filename=file.filename,
             target_lang=target_lang,
