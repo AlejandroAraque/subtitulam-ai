@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import sys
 from pathlib import Path
@@ -128,7 +129,8 @@ async def main_async(args) -> int:
 
     texts_dict = {c["idx"]: c["text"] for c in cues}
     print(f"[3/4] Traduciendo · target={args.target_lang} · cpl={args.cpl} "
-          f"· rag={args.rag} · sliding=20 · glossary={len(glossary_terms)}")
+          f"· rag={args.rag} · sliding={args.sliding_window_size} "
+          f"· glossary={len(glossary_terms)}")
 
     try:
         result = await translation_service.translate_texts(
@@ -139,7 +141,7 @@ async def main_async(args) -> int:
             job_id=(job.id if job else None),
             filename=src_path.name,
             use_rag=args.rag,
-            sliding_window_size=20,
+            sliding_window_size=args.sliding_window_size,
             glossary=glossary_terms,
         )
     except Exception as e:
@@ -151,16 +153,16 @@ async def main_async(args) -> int:
 
     translations = result["translations"]
 
+    # ── CPL compliance: % de líneas del target con longitud ≤ cpl ─────────
+    all_lines: list[str] = []
+    for txt in translations.values():
+        all_lines.extend([ln for ln in txt.split("\n") if ln.strip()])
+    n_total = max(1, len(all_lines))
+    n_under = sum(1 for ln in all_lines if len(ln) <= args.cpl)
+    cpl_compliance = round(n_under / n_total * 100, 1)
+
     # ── Si --index, completar el job (insertar Translations + status='completed') ─
     if args.index and db is not None and job is not None:
-        # Calcular CPL compliance
-        all_lines: list[str] = []
-        for txt in translations.values():
-            all_lines.extend([ln for ln in txt.split("\n") if ln.strip()])
-        n_total = max(1, len(all_lines))
-        n_under = sum(1 for ln in all_lines if len(ln) <= args.cpl)
-        cpl_compliance = round(n_under / n_total * 100, 1)
-
         await history_service.complete_job(
             db,
             job=job,
@@ -172,16 +174,35 @@ async def main_async(args) -> int:
             tokens_completion=result["tokens_completion"],
         )
         db.close()
-        print(f"      Job {job.id} completado · CPL compliance: {cpl_compliance}%")
+        print(f"      Job {job.id} completado en SQLite")
 
     srt_out = rebuild_srt(cues, translations)
     out_path.write_text(srt_out, encoding="utf-8")
     size_kb = out_path.stat().st_size / 1024
 
-    print(f"[4/4] Escrito {out_path.relative_to(HERE.parent.parent)} ({size_kb:.1f} KB)")
-    print(f"      Tokens prompt={result['tokens_prompt']}, completion={result['tokens_completion']}, "
-          f"total={result['tokens_prompt']+result['tokens_completion']}")
-    print(f"      Latencia: {result['elapsed_s']:.2f}s")
+    # ── Volcar stats JSON junto al SRT (para la tabla de ablación de v2.5) ─
+    stats = {
+        "version":           args.version,
+        "src":               src_path.name,
+        "n_cues":            len(cues),
+        "use_rag":           args.rag,
+        "sliding_window":    args.sliding_window_size,
+        "n_glossary_terms":  len(glossary_terms),
+        "tokens_prompt":     result["tokens_prompt"],
+        "tokens_completion": result["tokens_completion"],
+        "tokens_total":      result["tokens_prompt"] + result["tokens_completion"],
+        "elapsed_s":         round(result["elapsed_s"], 2),
+        "cpl_limit":         args.cpl,
+        "cpl_compliance":    cpl_compliance,
+    }
+    stats_path = out_path.with_name(f"{args.version}_stats.json")
+    stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"[4/4] Escrito {out_path.relative_to(HERE.parent.parent)} ({size_kb:.1f} KB) "
+          f"+ {stats_path.name}")
+    print(f"      Tokens prompt={stats['tokens_prompt']}, completion={stats['tokens_completion']}, "
+          f"total={stats['tokens_total']}")
+    print(f"      Latencia: {stats['elapsed_s']}s · CPL compliance: {cpl_compliance}%")
     return 0
 
 
@@ -206,6 +227,10 @@ def main() -> int:
     parser.add_argument("--no-glossary", action="store_true",
                         help="Desactivar el glosario (por defecto se inyecta "
                              "lo que haya en SQLite). Útil para ablar.")
+    parser.add_argument("--sliding-window-size", type=int, default=20,
+                        help="Cuántas cues anteriores del MISMO archivo "
+                             "inyectar como contexto. 0 = desactivado. "
+                             "Default: 20.")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 
