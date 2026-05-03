@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Backend: FastAPI + uvicorn
+# ─────────────────────────────────────────────────────────────────────────────
+# Imagen base con uv preinstalado para consistencia con el dev local.
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+
+# Instalar dependencias primero (caché de capas: si pyproject/lock no
+# cambian, no se reinstala todo en cada build).
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+# Copiar el código de la app
+COPY app/        ./app/
+COPY scripts/    ./scripts/
+
+# El directorio de datos se montará como volumen desde docker-compose
+# para persistir SQLite entre arranques del contenedor.
+RUN mkdir -p /app/data
+
+EXPOSE 8000
+
+# Comprobar salud antes de marcar el contenedor como ready.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/').read()" || exit 1
+
+# uvicorn en 0.0.0.0 para escuchar fuera del contenedor.
+# --reload solo en dev local, en docker-compose se omite.
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

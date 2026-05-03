@@ -8,6 +8,7 @@ Backend:   uvicorn app.main:app --reload   (puerto 8000)
 """
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from html import escape
@@ -17,7 +18,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BACKEND_URL = "http://localhost:8000"
+# Configurable vía env para que docker-compose pueda apuntar al servicio
+# "backend" en lugar de localhost. Default localhost para dev local sin Docker.
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

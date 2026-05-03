@@ -1,0 +1,44 @@
+# No copiar al contexto de build cosas grandes/innecesarias.
+
+# Entorno virtual local
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Datos locales (se montan como volumen, no dentro de la imagen)
+data/
+logs/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker (no se mete a sí mismo recursivamente)
+docker/
+docker-compose.yml
+.dockerignore
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Memoria del TFM (local-only)
+docs/memoria/
+
+# Variables de entorno reales (se inyectan en runtime, no en build)
+.env
+
+# Tests y artefactos de desarrollo
+.pytest_cache/
+.coverage
+htmlcov/

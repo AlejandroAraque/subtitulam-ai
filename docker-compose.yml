@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Subtitulam — stack production-grade en 3 contenedores.
+#
+#   qdrant    : vector store standalone (puerto 6333 HTTP, 6334 gRPC)
+#   backend   : FastAPI + uvicorn (puerto 8000)
+#   frontend  : Streamlit (puerto 8501)
+#
+# Levantar:
+#   1. cp .env.example .env   y rellena OPENAI_API_KEY
+#   2. docker compose up -d
+#   3. abre http://localhost:8501
+#
+# Persistencia:
+#   - qdrant_storage : vectores indexados (volumen Docker nombrado)
+#   - app_data       : SQLite (jobs, glossary, translations) + outputs
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: subtitulam-qdrant
+    ports:
+      - "6333:6333"   # HTTP REST + dashboard web (http://localhost:6333/dashboard)
+      - "6334:6334"   # gRPC (más rápido para batches grandes)
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: subtitulam-backend
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      QDRANT_URL:     http://qdrant:6333
+      DATABASE_URL:   sqlite:////app/data/subtitulam.db
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: subtitulam-frontend
+    ports:
+      - "8501:8501"
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:
+  app_data:

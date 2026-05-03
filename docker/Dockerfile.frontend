@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Frontend: Streamlit
+# ─────────────────────────────────────────────────────────────────────────────
+# Misma imagen base que el backend para reaprovechar caché de layers.
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+# Solo necesita el script de Streamlit. NO copiamos app/ — la UI habla
+# con el backend por HTTP, no comparte código.
+COPY app_ui.py ./
+
+EXPOSE 8501
+
+# Streamlit en 0.0.0.0 + headless para que arranque sin abrir navegador.
+# baseUrlPath="" para que sirva en la raíz.
+CMD ["uv", "run", "streamlit", "run", "app_ui.py", \
+     "--server.address", "0.0.0.0", \
+     "--server.port", "8501", \
+     "--server.headless", "true"]
