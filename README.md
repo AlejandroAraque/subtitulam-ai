@@ -3,7 +3,7 @@
 Herramienta para traducir archivos `.srt` del inglés al español usando
 GPT-4o como motor central, con tres componentes diferenciadores:
 
-- **RAG con ChromaDB** — recupera ejemplos similares de un corpus indexado
+- **RAG con Qdrant** — recupera ejemplos similares de un corpus indexado
   de traducciones previas, aportando consistencia léxica entre archivos.
 - **Sliding window de 20 cues** — incluye las traducciones recientes del
   mismo archivo en cada batch, asegurando coherencia narrativa interna.
@@ -18,11 +18,12 @@ estándar (BLEU, chrF, CPL compliance, glossary compliance) sobre OPUS-100.
 
 ## Stack
 
-- **Backend**: FastAPI + SQLAlchemy 2 + SQLite + ChromaDB embedded.
+- **Backend**: FastAPI + SQLAlchemy 2 + SQLite + Qdrant (vector store standalone).
 - **Frontend**: Streamlit 1.40+ con CSS injectado.
 - **LLM**: OpenAI GPT-4o (traducción) + text-embedding-3-small (RAG) +
   gpt-4o-mini (auto-context).
 - **Evaluación**: sacrebleu + datasets (Hugging Face).
+- **Despliegue**: Docker Compose con 3 contenedores (Qdrant + backend + frontend).
 - **Gestión de dependencias**: `uv` (recomendado) o `pip`.
 
 ---
@@ -39,7 +40,49 @@ según el tier de TPM de tu cuenta OpenAI.
 
 ---
 
-## Setup en 5 minutos
+## Despliegue con Docker (recomendado)
+
+La forma más simple de tener todo el sistema corriendo en cualquier máquina
+con Docker es el `docker-compose.yml` incluido. Levanta los 3 servicios
+(Qdrant + backend + frontend) aislados con persistencia en volúmenes Docker.
+
+```bash
+# 1. Clonar
+git clone https://github.com/AlejandroAraque/subtitulam-ai.git
+cd subtitulam-ai
+
+# 2. Configurar variables (copia la plantilla y rellena la API key)
+cp .env.example .env
+# edita .env y pon tu OPENAI_API_KEY=sk-...
+
+# 3. Levantar el stack
+docker compose up -d --build
+
+# 4. Verificar (los 3 servicios deben estar UP, backend HEALTHY)
+docker compose ps
+```
+
+Abre [http://localhost:8501](http://localhost:8501) para la UI.
+
+| Servicio | URL local | Función |
+|---|---|---|
+| Frontend (Streamlit) | http://localhost:8501 | UI principal |
+| Backend (FastAPI) | http://localhost:8000 | API + docs Swagger en `/docs` |
+| Qdrant dashboard | http://localhost:6333/dashboard | Inspección visual de los vectores |
+
+**Persistencia**: los datos sobreviven a `docker compose down`/`up` mediante
+dos volúmenes Docker nombrados (`qdrant_storage` y `app_data`). Solo se
+borran con `docker compose down -v` (acción consciente).
+
+**Para Qdrant Cloud en lugar de self-hosted**: descomenta `QDRANT_URL` y
+`QDRANT_API_KEY` en `.env` y comenta el servicio `qdrant` en
+`docker-compose.yml`. El código del backend funciona sin cambios.
+
+---
+
+## Setup en local (sin Docker, para desarrollo)
+
+Si prefieres iterar sobre el código sin rebuild de imagen cada vez:
 
 ```bash
 # 1. Clonar y entrar
@@ -49,20 +92,33 @@ cd subtitulam-ai
 # 2. Instalar dependencias (uv crea el venv automáticamente)
 uv sync
 
-# 3. Crear .env con tu API key
-echo "OPENAI_API_KEY=sk-..." > .env
+# 3. Configurar variables
+cp .env.example .env
+# edita .env y pon tu OPENAI_API_KEY=sk-...
 
-# 4. Arrancar el backend (puerto 8000)
+# 4. Arrancar Qdrant en Docker (necesario — ya no usamos vector store embebido)
+docker run -d --name subtitulam-qdrant -p 6333:6333 \
+    -v $(pwd)/data/qdrant_storage:/qdrant/storage \
+    qdrant/qdrant:latest
+
+# 5. Arrancar el backend (puerto 8000)
 uv run uvicorn app.main:app --reload
 
-# 5. En otra terminal, arrancar el frontend (puerto 8501)
+# 6. En otra terminal, arrancar el frontend (puerto 8501)
 uv run streamlit run app_ui.py
 ```
 
 La primera arrancada del backend crea automáticamente:
 
-- `subtitulam.db` — SQLite con tablas `glossary_terms`, `jobs`, `translations`.
-- `data/chromadb/` — directorio del vector store.
+- `data/subtitulam.db` — SQLite con tablas `glossary_terms`, `jobs`, `translations`.
+- La colección `translations` en Qdrant (idempotente).
+
+Si tenías corpus indexado en ChromaDB de versiones anteriores, re-indéxalo
+una sola vez en Qdrant:
+
+```bash
+uv run python scripts/backfill_qdrant.py
+```
 
 Abre [http://localhost:8501](http://localhost:8501) y sube un `.srt`.
 
@@ -95,7 +151,7 @@ uv run python data/showcase/translate_showcase.py \
     --srt-path data/showcase/raw/mi_pelicula.srt \
     --rag --auto-context
 
-# Modo "indexado" (crea Job en SQLite + indexa en ChromaDB)
+# Modo "indexado" (crea Job en SQLite + indexa en Qdrant)
 uv run python data/showcase/translate_showcase.py \
     --version mi_run_indexed \
     --srt-path data/showcase/raw/mi_pelicula.srt \
@@ -108,7 +164,7 @@ Flags relevantes:
 
 | Flag | Default | Efecto |
 |---|---|---|
-| `--rag` | desactivado | activa retrieval desde ChromaDB |
+| `--rag` | desactivado | activa retrieval desde Qdrant |
 | `--sliding-window-size N` | 20 | nº de cues anteriores como contexto. 0 = off |
 | `--no-glossary` | activado | desactiva inyección del glosario |
 | `--auto-context` | desactivado | gpt-4o-mini deduce contexto del título |
@@ -141,7 +197,7 @@ app/
 ├── services/
 │   ├── translation_service.py    # build_system_prompt, translate_texts
 │   ├── glossary_service.py       # CRUD + import_csv_rows
-│   ├── rag_service.py            # ChromaDB wrapper (query + index)
+│   ├── rag_service.py            # Qdrant wrapper (query + index)
 │   ├── embedding_service.py      # OpenAI embeddings
 │   ├── context_service.py        # auto-context con gpt-4o-mini
 │   └── history_service.py        # lifecycle de jobs
@@ -149,13 +205,24 @@ app/
 
 app_ui.py                    # Frontend Streamlit (single file)
 
+docker/
+├── Dockerfile.backend       # imagen del backend (FastAPI + uvicorn)
+└── Dockerfile.frontend      # imagen del frontend (Streamlit)
+
+docker-compose.yml           # stack de 3 servicios (qdrant + backend + frontend)
+.env.example                 # plantilla de variables de entorno
+
 data/
-├── chromadb/                # vector store (gitignored)
+├── qdrant_storage/          # vector store local sin Docker (gitignored)
+├── subtitulam.db            # SQLite local sin Docker (gitignored)
 ├── showcase/
 │   ├── selected/            # SRTs canónicos para tests
 │   ├── raw/                 # SRTs de prueba personales (gitignored)
 │   ├── runs/                # outputs de translate_showcase (gitignored)
 │   └── translate_showcase.py    # script CLI
+
+scripts/
+└── backfill_qdrant.py       # re-indexa SQLite → Qdrant (idempotente)
 
 eval/
 ├── runner.py                # evaluación BLEU/chrF sobre dataset
@@ -174,20 +241,31 @@ eval/
 | Variable | Requerida | Default | Notas |
 |---|---|---|---|
 | `OPENAI_API_KEY` | sí | — | Acceso a GPT-4o + embeddings |
+| `QDRANT_URL` | no | `http://localhost:6333` (local) / `http://qdrant:6333` (Docker compose) | URL del vector store |
+| `QDRANT_API_KEY` | no | (vacío) | Solo si usas **Qdrant Cloud** en lugar de self-hosted |
+| `BACKEND_URL` | no | `http://localhost:8000` (local) / `http://backend:8000` (Docker compose) | URL que el frontend usa para hablar con el backend |
+| `DATABASE_URL` | no | `sqlite:///data/subtitulam.db` (local) / `sqlite:////app/data/subtitulam.db` (Docker compose) | Override para Postgres si migras |
 
-No hay otras variables — el resto de configuración vive en código (modelo,
-temperatura, batch size, etc.) o como flags del script CLI.
+El resto de configuración (modelo, temperatura, batch size, etc.) vive en
+código o como flags del script CLI.
 
 ### Reseteo de la base de datos
 
-Para empezar de cero (borra glosario, historial y vectores):
+**Local (sin Docker):**
 
 ```bash
-rm subtitulam.db
-rm -rf data/chromadb/
+rm data/subtitulam.db
+rm -rf data/qdrant_storage/
 ```
 
-El backend recrea ambos al siguiente arranque.
+El backend recrea SQLite y Qdrant recrea la colección al siguiente arranque.
+
+**En Docker compose:**
+
+```bash
+docker compose down -v   # -v borra los volúmenes nombrados
+docker compose up -d --build
+```
 
 ### TPM (Tokens Per Minute) de OpenAI
 
