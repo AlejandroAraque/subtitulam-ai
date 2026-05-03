@@ -17,4 +17,5 @@ dependencies = [
     "sacrebleu>=2.6.0",
     "datasets>=4.8.5",
     "chromadb>=1.5.8",
+    "qdrant-client>=1.17.1",
 ]

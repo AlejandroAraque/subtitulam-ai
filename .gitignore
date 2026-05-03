@@ -24,8 +24,11 @@ env/
 *.db
 *.sqlite3
 
-# Almacén vectorial de ChromaDB (SQLite + binarios internos, no versionar)
+# Almacén vectorial de ChromaDB (legacy v2.x, SQLite + binarios internos, no versionar)
 data/chromadb/
+
+# Almacén vectorial de Qdrant (v3.0+, volumen Docker persistente, no versionar)
+data/qdrant_storage/
 
 # Memoria del TFM — notas personales que viven solo en local
 docs/memoria/
