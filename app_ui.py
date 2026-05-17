@@ -2001,9 +2001,10 @@ def render_preview():
     with cfg_col:
         interval_s = st.slider(
             "Sample cada N segundos",
-            min_value=0.5, max_value=10.0, value=2.0, step=0.5,
+            min_value=0.5, max_value=10.0, value=3.0, step=0.5,
             key="prv_cv_interval",
-            help="Menor = más cobertura, más tiempo. 2s es buen balance.",
+            help="Menor = más cobertura, más tiempo. Procesamiento en CPU: "
+                 "~6-7s por frame a 1080p. Para vídeos largos sube a 5-10s.",
         )
     with btn_col:
         st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)

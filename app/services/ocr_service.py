@@ -163,20 +163,31 @@ def _draw_bboxes_on_thumbnail(
 def detect_text_in_frames(
     frames: list[tuple[float, np.ndarray]],
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    max_detect_width: int = 1280,
 ) -> list[dict]:
     """Para cada frame detecta regiones con texto. Solo bboxes, sin leer
     el contenido (Nivel 2 lo leerá llamando a reader.readtext).
+
+    Optimización: si el frame original es más ancho que `max_detect_width`
+    (típicamente 1080p o superior), se redimensiona antes de pasar a EasyOCR.
+    Reduce el coste ~2-3× con pérdida de precisión despreciable. Las
+    bboxes se reescalan al tamaño original para que coincidan con el
+    thumbnail.
 
     Args:
         frames: salida de `extract_frames`.
         progress_callback: opcional, función `(done, total) -> None` para
             actualizar una progress bar en la UI.
+        max_detect_width: ancho máximo del frame a pasar al detector.
+            Default 1280 (720p). Subir para más precisión, bajar para más
+            velocidad.
 
     Returns:
         Lista de dicts con keys:
           timestamp_s : float
           n_regions   : int (número de regiones de texto detectadas)
-          bboxes      : list[list[int]] (cada bbox = [x_min, x_max, y_min, y_max])
+          bboxes      : list[list[int]] (cada bbox = [x_min, x_max, y_min, y_max]
+                                        en coordenadas del frame ORIGINAL)
           thumbnail   : bytes (JPEG con las bboxes dibujadas para QA visual)
 
         SOLO incluye frames donde se detectó al menos una región.
@@ -188,22 +199,46 @@ def detect_text_in_frames(
     for i, (ts, frame) in enumerate(frames):
         if progress_callback is not None:
             progress_callback(i + 1, total)
+
+        # Redimensionar a max_detect_width si es necesario (acelera ~2-3×)
+        h, w = frame.shape[:2]
+        if w > max_detect_width:
+            scale = max_detect_width / w
+            scaled = cv2.resize(
+                frame,
+                (max_detect_width, int(round(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            scale = 1.0
+            scaled = frame
+
         try:
             # reader.detect() devuelve (horizontal_list, free_list).
             # horizontal_list = bboxes axis-aligned [x_min, x_max, y_min, y_max].
-            detection = reader.detect(frame)
-            h_boxes = detection[0][0] if detection and len(detection) > 0 else []
+            detection = reader.detect(scaled)
+            h_boxes_scaled = detection[0][0] if detection and len(detection) > 0 else []
         except Exception as e:
             logger.warning("detect frame %.2fs falló: %s", ts, e)
             continue
 
-        if not h_boxes:
+        if not h_boxes_scaled:
             continue
 
-        bboxes_int = [list(map(int, bbox)) for bbox in h_boxes]
+        # Reescalar bboxes al tamaño ORIGINAL del frame
+        if scale != 1.0:
+            inv = 1.0 / scale
+            bboxes_int = [
+                [int(round(bbox[0] * inv)), int(round(bbox[1] * inv)),
+                 int(round(bbox[2] * inv)), int(round(bbox[3] * inv))]
+                for bbox in h_boxes_scaled
+            ]
+        else:
+            bboxes_int = [list(map(int, bbox)) for bbox in h_boxes_scaled]
+
         results.append({
             "timestamp_s": ts,
-            "n_regions":   len(h_boxes),
+            "n_regions":   len(h_boxes_scaled),
             "bboxes":      bboxes_int,
             "thumbnail":   _draw_bboxes_on_thumbnail(frame, bboxes_int),
         })
