@@ -1512,10 +1512,27 @@ def render_preview():
         next_c = live_effective[i + 1] if i + 1 < len(live_effective) else None
         metrics_by_idx[c["index"]] = _compute_cue_metrics(c, next_c)
 
-    # ── Caja de búsqueda + título de la lista ──────────────────────────
-    st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
+    # ── Stats globales: 4 tarjetas con compliance del .srt activo ───────
+    n_live = len(live_effective)
+    if n_live > 0:
+        n_problems = sum(1 for m in metrics_by_idx.values() if m["status"] != "ok")
+        n_cpl_ok   = sum(1 for m in metrics_by_idx.values() if m["cpl_max"] <= 42)
+        n_cps_ok   = sum(1 for m in metrics_by_idx.values() if m["cps"] <= 17)
+        pct_cpl = round(n_cpl_ok * 100 / n_live, 1)
+        pct_cps = round(n_cps_ok * 100 / n_live, 1)
 
-    search_col, label_col = st.columns([2, 1.5], gap="medium")
+        st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="gl-stats">
+          <div class="gl-stat"><div class="v">{n_live}</div><div class="l">Cues activos</div></div>
+          <div class="gl-stat"><div class="v">{pct_cpl}%</div><div class="l">CPL ≤ 42</div></div>
+          <div class="gl-stat"><div class="v">{pct_cps}%</div><div class="l">CPS ≤ 17</div></div>
+          <div class="gl-stat"><div class="v">{n_problems}</div><div class="l">Con problemas</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── Caja de búsqueda + filtro por tipo + contador ──────────────────
+    search_col, filter_col, label_col = st.columns([2, 1.3, 1], gap="medium")
     with search_col:
         search_query = st.text_input(
             "Buscar",
@@ -1524,8 +1541,23 @@ def render_preview():
             label_visibility="collapsed",
             key="prv_search_input",
         )
-        # Sincronizar para persistir entre reruns
         st.session_state.prv_search = search_query
+
+    FILTER_OPTIONS = [
+        "Todos los cues",
+        "Solo con problemas",
+        "Solo errores",
+        "Solo CPL excedido",
+        "Solo CPS excedido",
+        "Solo duración fuera de rango",
+    ]
+    with filter_col:
+        filter_choice = st.selectbox(
+            "Filtro",
+            FILTER_OPTIONS,
+            label_visibility="collapsed",
+            key="prv_filter",
+        )
 
     # Aplicar filtro de búsqueda (case-insensitive, sobre el texto efectivo)
     q = (search_query or "").strip().lower()
@@ -1535,17 +1567,40 @@ def render_preview():
             if q in edits.get(c["index"], c["text"]).lower()
         ]
     else:
-        filtered = cues
+        filtered = cues[:]
+
+    # Aplicar filtro por tipo de problema. Solo afecta a cues vivos
+    # (los eliminados nunca aparecen bajo un filtro de problema).
+    def _passes_filter(c: dict) -> bool:
+        if c["index"] in deleted:
+            # En "Todos los cues" sí aparece (para poder restaurarlo).
+            # En cualquier filtro de problema, no.
+            return filter_choice == "Todos los cues"
+        m = metrics_by_idx.get(c["index"])
+        if m is None:
+            return True
+        if filter_choice == "Todos los cues":          return True
+        if filter_choice == "Solo con problemas":      return m["status"] != "ok"
+        if filter_choice == "Solo errores":            return m["status"] == "err"
+        if filter_choice == "Solo CPL excedido":       return m["cpl_max"] > 42
+        if filter_choice == "Solo CPS excedido":       return m["cps"] > 17
+        if filter_choice == "Solo duración fuera de rango":
+            return m["duration"] < 0.833 or m["duration"] > 7.0
+        return True
+
+    if filter_choice != "Todos los cues":
+        filtered = [c for c in filtered if _passes_filter(c)]
 
     with label_col:
         n_filt = len(filtered)
         n_total = len(cues)
-        info = f'{n_filt} de {n_total} cues' if q else f'{n_total} cues'
-        if edits:   info += f' · {len(edits)} editado(s)'
-        if deleted: info += f' · {len(deleted)} eliminado(s)'
+        any_filter = bool(q) or filter_choice != "Todos los cues"
+        info = f'{n_filt} de {n_total}' if any_filter else f'{n_total} cues'
+        if edits:   info += f' · {len(edits)} ed'
+        if deleted: info += f' · {len(deleted)} elim'
         st.markdown(
             f'<div class="sl-row" style="margin-top:6px;justify-content:flex-end;">'
-            f'<span class="mono" style="color:var(--text-4);font-size:12px;">{info}</span>'
+            f'<span class="mono" style="color:var(--text-4);font-size:11.5px;">{info}</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
