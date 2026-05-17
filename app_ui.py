@@ -1853,6 +1853,39 @@ def render_preview():
                     "Cambia o borra la búsqueda.")
         return
 
+    # ── Paginación: solo si la lista visible > CUES_PER_PAGE ───────────
+    CUES_PER_PAGE = 50
+    st.session_state.setdefault("prv_cues_page", 0)
+    total_cue_pages = max(1, (len(filtered) + CUES_PER_PAGE - 1) // CUES_PER_PAGE)
+    # min() evita que un filtro restrictivo deje la página actual fuera de rango
+    cue_page = min(st.session_state.prv_cues_page, total_cue_pages - 1)
+
+    if total_cue_pages > 1:
+        p_prev, p_info, p_next = st.columns([1, 2, 1], gap="small")
+        with p_prev:
+            if st.button("◀ Anterior", use_container_width=True,
+                         key="prv_cues_page_prev",
+                         disabled=cue_page == 0):
+                st.session_state.prv_cues_page = max(0, cue_page - 1)
+                st.rerun()
+        with p_info:
+            start_idx = cue_page * CUES_PER_PAGE + 1
+            end_idx = min(start_idx + CUES_PER_PAGE - 1, len(filtered))
+            st.markdown(
+                f'<div class="mono" style="text-align:center;'
+                f'color:var(--text-3);font-size:11.5px;margin-top:8px;">'
+                f'Página {cue_page+1}/{total_cue_pages} · '
+                f'Mostrando {start_idx}-{end_idx} de {len(filtered)}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with p_next:
+            if st.button("Siguiente ▶", use_container_width=True,
+                         key="prv_cues_page_next",
+                         disabled=cue_page >= total_cue_pages - 1):
+                st.session_state.prv_cues_page = min(total_cue_pages - 1, cue_page + 1)
+                st.rerun()
+
     # Header HTML de la tabla (7 columnas: #, ts, texto, ▶, ✏️, 🗑, +)
     st.markdown("""
     <div class="gl-thead-grid" style="grid-template-columns:0.5fr 0.7fr 2.4fr 0.35fr 0.35fr 0.35fr 0.35fr;">
@@ -1866,9 +1899,14 @@ def render_preview():
     </div>
     """, unsafe_allow_html=True)
 
+    # Slice de la página actual (si total ≤ CUES_PER_PAGE, equivale a filtered entero)
+    page_start = cue_page * CUES_PER_PAGE
+    page_end = page_start + CUES_PER_PAGE
+    cues_to_render = filtered[page_start:page_end]
+
     # Filas de cues
     st.markdown('<div class="gl-rows-marker"></div>', unsafe_allow_html=True)
-    for cue in filtered:
+    for cue in cues_to_render:
         c_idx, c_ts, c_txt, c_seek, c_edit, c_del, c_add = st.columns(
             [0.5, 0.7, 2.4, 0.35, 0.35, 0.35, 0.35],
             gap="small",
@@ -1988,6 +2026,35 @@ def render_preview():
                 default_start_s=cue["end_s"] + 0.1,
                 default_end_s=cue["end_s"] + 2.1,
             )
+
+    # Controles de paginación al final también (para no tener que hacer
+    # scroll arriba si la página tiene muchas filas).
+    if total_cue_pages > 1:
+        st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+        p_prev2, p_info2, p_next2 = st.columns([1, 2, 1], gap="small")
+        with p_prev2:
+            if st.button("◀ Anterior", use_container_width=True,
+                         key="prv_cues_page_prev_bottom",
+                         disabled=cue_page == 0):
+                st.session_state.prv_cues_page = max(0, cue_page - 1)
+                st.rerun()
+        with p_info2:
+            start_idx = cue_page * CUES_PER_PAGE + 1
+            end_idx = min(start_idx + CUES_PER_PAGE - 1, len(filtered))
+            st.markdown(
+                f'<div class="mono" style="text-align:center;'
+                f'color:var(--text-3);font-size:11.5px;margin-top:8px;">'
+                f'Página {cue_page+1}/{total_cue_pages} · '
+                f'{start_idx}-{end_idx} de {len(filtered)}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with p_next2:
+            if st.button("Siguiente ▶", use_container_width=True,
+                         key="prv_cues_page_next_bottom",
+                         disabled=cue_page >= total_cue_pages - 1):
+                st.session_state.prv_cues_page = min(total_cue_pages - 1, cue_page + 1)
+                st.rerun()
 
     # ── Sección Computer Vision: detección de texto en pantalla ────────
     st.markdown('<div style="height:32px;"></div>', unsafe_allow_html=True)
