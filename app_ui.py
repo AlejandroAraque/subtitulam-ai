@@ -1545,8 +1545,8 @@ def render_preview():
 
     FILTER_OPTIONS = [
         "Todos los cues",
-        "Solo con problemas",
-        "Solo errores",
+        "Con problemas",
+        "Con problemas críticos",
         "Solo CPL excedido",
         "Solo CPS excedido",
         "Solo duración fuera de rango",
@@ -1580,8 +1580,8 @@ def render_preview():
         if m is None:
             return True
         if filter_choice == "Todos los cues":          return True
-        if filter_choice == "Solo con problemas":      return m["status"] != "ok"
-        if filter_choice == "Solo errores":            return m["status"] == "err"
+        if filter_choice == "Con problemas":           return m["status"] != "ok"
+        if filter_choice == "Con problemas críticos":  return m["status"] == "err"
         if filter_choice == "Solo CPL excedido":       return m["cpl_max"] > 42
         if filter_choice == "Solo CPS excedido":       return m["cps"] > 17
         if filter_choice == "Solo duración fuera de rango":
