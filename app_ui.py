@@ -843,42 +843,58 @@ def process_translation(srt_file, context: str, target_lang: str, cpl_limit: int
 # ═══════════════════════════════════════════════════════════════════════════
 # COLA DE TRADUCCIÓN (in-process, single-user, sin Redis)
 # ═══════════════════════════════════════════════════════════════════════════
-# Patrón: la cola vive en variables del MÓDULO (no st.session_state) para
-# que el worker thread pueda escribir sin causar warnings de Streamlit.
-# Single-user porque el módulo es único por proceso de Streamlit.
+# Patrón: usar st.cache_resource para que el estado de la cola sobreviva
+# a los reruns de Streamlit (las variables de módulo se REINICIAN en cada
+# rerun, así que no sirven; cache_resource sí persiste).
+#
+# El worker thread puede mutar el dict cacheado libremente — Streamlit
+# garantiza que es el MISMO objeto entre reruns.
 #
 # Para migrar a Redis (multi-user, persistencia) en el futuro: sustituir
 # estas funciones por llamadas a arq/Celery. La UI del Workspace no
 # cambia — sigue llamando a enqueue_translation() y get_queue_snapshot().
 import threading
 import uuid as _queue_uuid
-from copy import deepcopy
 
-_q_lock = threading.Lock()
-_q_pending: list[dict] = []      # jobs encolados, no empezados
-_q_current: Optional[dict] = None  # job en proceso AHORA (o None)
-_q_completed: list[dict] = []    # historial de la sesión
-_q_worker_started = False
+
+@st.cache_resource
+def _get_queue_state() -> dict:
+    """Singleton del estado de cola. cache_resource sobrevive a reruns
+    y a navegación entre páginas. Es el MISMO objeto entre todas las
+    llamadas a esta función dentro del mismo proceso Streamlit.
+    """
+    return {
+        "lock":            threading.Lock(),
+        "pending":         [],     # jobs encolados, no empezados
+        "current":         None,   # job en proceso AHORA (o None)
+        "completed":       [],     # historial de la sesión
+        "worker_started":  False,
+    }
 
 
 def _translation_worker_loop() -> None:
-    """Loop infinito: drena la cola uno a uno. Vive en un daemon thread."""
-    global _q_current
+    """Loop infinito: drena la cola uno a uno. Vive en un daemon thread.
+
+    Lee el dict cacheado por cache_resource — es el mismo objeto que ve
+    el UI desde el thread principal.
+    """
+    state = _get_queue_state()
     while True:
         # Sacar el siguiente job
-        with _q_lock:
-            if _q_pending:
-                _q_current = _q_pending.pop(0)
-                _q_current["status"] = "translating"
-                _q_current["started_at"] = datetime.utcnow().isoformat()
+        with state["lock"]:
+            if state["pending"]:
+                job = state["pending"].pop(0)
+                job["status"] = "translating"
+                job["started_at"] = datetime.utcnow().isoformat()
+                state["current"] = job
             else:
-                _q_current = None
+                state["current"] = None
+                job = None
 
-        if _q_current is None:
+        if job is None:
             time.sleep(1.0)
             continue
 
-        job = _q_current
         try:
             result = _process_translation_raw(
                 job["srt_name"],
@@ -887,31 +903,32 @@ def _translation_worker_loop() -> None:
                 job["target_lang"],
                 job["cpl_limit"],
             )
-            with _q_lock:
+            with state["lock"]:
                 job["status"] = "completed"
                 job["completed_at"] = datetime.utcnow().isoformat()
                 job["result_bytes"] = result["bytes"]
                 job["result_name"]  = result["filename"]
                 job["metrics"]      = result["metrics"]
-                _q_completed.append(job)
-                _q_current = None
+                state["completed"].append(job)
+                state["current"] = None
         except Exception as e:
-            with _q_lock:
+            with state["lock"]:
                 job["status"] = "failed"
                 job["completed_at"] = datetime.utcnow().isoformat()
                 job["error"] = str(e)
-                _q_completed.append(job)
-                _q_current = None
+                state["completed"].append(job)
+                state["current"] = None
 
 
 def _ensure_worker() -> None:
     """Arranca el worker una sola vez por proceso."""
-    global _q_worker_started
-    if _q_worker_started:
-        return
+    state = _get_queue_state()
+    with state["lock"]:
+        if state["worker_started"]:
+            return
+        state["worker_started"] = True
     t = threading.Thread(target=_translation_worker_loop, daemon=True)
     t.start()
-    _q_worker_started = True
 
 
 def enqueue_translation(
@@ -922,6 +939,7 @@ def enqueue_translation(
 ) -> str:
     """Encola un .srt para traducción. Devuelve el id del job."""
     _ensure_worker()
+    state = _get_queue_state()
     job_id = _queue_uuid.uuid4().hex[:8]
     job = {
         "id":          job_id,
@@ -940,37 +958,35 @@ def enqueue_translation(
         "metrics":      None,
         "error":        None,
     }
-    with _q_lock:
-        _q_pending.append(job)
+    with state["lock"]:
+        state["pending"].append(job)
     return job_id
 
 
 def get_queue_snapshot() -> dict:
-    """Snapshot inmutable del estado de la cola para renderizar la UI.
-
-    Los bytes del .srt original y del resultado NO se copian (son grandes),
-    se pasa la referencia directa. El caller solo lee.
-    """
-    with _q_lock:
+    """Snapshot del estado de la cola para renderizar la UI."""
+    state = _get_queue_state()
+    with state["lock"]:
         return {
-            "pending":   [_shallow_job(j) for j in _q_pending],
-            "current":   _shallow_job(_q_current) if _q_current else None,
-            "completed": [_shallow_job(j) for j in _q_completed],
+            "pending":   [_shallow_job(j) for j in state["pending"]],
+            "current":   _shallow_job(state["current"]) if state["current"] else None,
+            "completed": [_shallow_job(j) for j in state["completed"]],
         }
 
 
 def _shallow_job(job: dict) -> dict:
-    """Copia ligera del job sin los bytes (que son grandes)."""
+    """Copia ligera del job sin los bytes pesados."""
     return {
         k: v for k, v in job.items()
-        if k not in ("srt_bytes",)  # bytes originales NO se copian
+        if k not in ("srt_bytes",)
     }
 
 
 def get_completed_job(job_id: str) -> Optional[dict]:
     """Devuelve un job completado por id (incluyendo result_bytes)."""
-    with _q_lock:
-        for j in _q_completed:
+    state = _get_queue_state()
+    with state["lock"]:
+        for j in state["completed"]:
             if j["id"] == job_id:
                 return j
     return None
@@ -978,8 +994,9 @@ def get_completed_job(job_id: str) -> Optional[dict]:
 
 def clear_completed_jobs() -> None:
     """Borra el historial de la sesión actual. No afecta a SQLite."""
-    with _q_lock:
-        _q_completed.clear()
+    state = _get_queue_state()
+    with state["lock"]:
+        state["completed"].clear()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SIDEBAR
