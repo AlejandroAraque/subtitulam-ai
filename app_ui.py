@@ -1483,8 +1483,13 @@ def _dialog_add_cue(
                 "Fin (HH:MM:SS o segundos)",
                 value=_format_srt_timestamp(default_end),
             )
+        # Si venimos de "Añadir como cue" desde la detección OCR, el texto
+        # traducido va pre-rellenado. Limpiamos el preset al cerrarse el
+        # dialog (st.rerun() abajo) para que el siguiente Add no lo herede.
+        preset = st.session_state.pop("prv_cv_preset_text", "")
         text = st.text_area(
             "Texto del cue",
+            value=preset,
             placeholder="Ej: Lunes, 14 de marzo",
             height=100,
         )
@@ -1997,19 +2002,27 @@ def render_preview():
         unsafe_allow_html=True,
     )
 
-    cfg_col, btn_col = st.columns([2, 1], gap="medium")
-    with cfg_col:
+    cfg_col1, cfg_col2, btn_col = st.columns([1.2, 1.2, 1], gap="medium")
+    with cfg_col1:
         interval_s = st.slider(
             "Sample cada N segundos",
             min_value=0.5, max_value=10.0, value=3.0, step=0.5,
             key="prv_cv_interval",
-            help="Menor = más cobertura, más tiempo. Procesamiento en CPU: "
-                 "~6-7s por frame a 1080p. Para vídeos largos sube a 5-10s.",
+            help="Menor = más cobertura, más tiempo. ~7-10s por frame a 1080p "
+                 "con lectura completa. Para vídeos largos sube a 5-10s.",
+        )
+    with cfg_col2:
+        min_conf = st.slider(
+            "Confianza mínima",
+            min_value=0.0, max_value=1.0, value=0.4, step=0.05,
+            key="prv_cv_min_conf",
+            help="Descarta detecciones con confianza menor. 0.4 es buen "
+                 "default; sube a 0.6 para resultados muy fiables.",
         )
     with btn_col:
         st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)
         detect_btn = st.button(
-            "🔍 Detectar texto en el vídeo",
+            "🔍 Detectar y leer texto",
             use_container_width=True,
             key="prv_cv_detect_btn",
             type="secondary",
@@ -2019,6 +2032,7 @@ def render_preview():
     current_video_sig = (video_file.name, video_file.size)
     if st.session_state.get("prv_cv_video_sig") != current_video_sig:
         st.session_state.prv_cv_detections = None
+        st.session_state.prv_cv_page = 0
         st.session_state.prv_cv_video_sig = current_video_sig
 
     if detect_btn:
@@ -2026,6 +2040,7 @@ def render_preview():
         import time as _time
         from pathlib import Path as _Path
         from app.services import ocr_service
+        import asyncio as _asyncio
 
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp.write(video_file.getvalue())
@@ -2044,20 +2059,35 @@ def render_preview():
             )
 
             def _on_progress(done: int, total: int) -> None:
-                pct = 0.10 + 0.85 * (done / max(total, 1))
+                pct = 0.10 + 0.80 * (done / max(total, 1))
                 progress.progress(
-                    pct, text=f"Analizando frame {done}/{total}…",
+                    pct, text=f"Leyendo texto frame {done}/{total}…",
                 )
 
-            detections = ocr_service.detect_text_in_frames(
-                frames, progress_callback=_on_progress,
+            detections = ocr_service.read_text_in_frames(
+                frames,
+                progress_callback=_on_progress,
+                min_confidence=min_conf,
+                filter_subtitle_zone=True,
             )
+
+            # Nivel 3: traducir los textos detectados con gpt-4o-mini
+            if detections:
+                progress.progress(
+                    0.92,
+                    text=f"Traduciendo {len(detections)} textos…",
+                )
+                detections = _asyncio.run(
+                    ocr_service.translate_detections(detections)
+                )
+
             dt = _time.time() - t0
             progress.progress(
                 1.0,
-                text=f"Hecho · {len(detections)} frames con texto · {dt:.1f}s",
+                text=f"Hecho · {len(detections)} textos · {dt:.1f}s",
             )
             st.session_state.prv_cv_detections = detections
+            st.session_state.prv_cv_page = 0
         finally:
             try:
                 _Path(tmp_path).unlink()
@@ -2075,39 +2105,121 @@ def render_preview():
             empty_state(
                 "🔎",
                 "No se detectó texto en el vídeo",
-                "Prueba con un intervalo más pequeño, o este vídeo no "
-                "tiene texto en pantalla.",
+                "Prueba con un intervalo más pequeño, baja la confianza, "
+                "o este vídeo no tiene texto en pantalla.",
             )
         else:
+            # Paginación: 12 detecciones por página (4 filas x 3 columnas)
+            DETECTIONS_PER_PAGE = 12
+            total_pages = (len(detections) + DETECTIONS_PER_PAGE - 1) // DETECTIONS_PER_PAGE
+            st.session_state.setdefault("prv_cv_page", 0)
+            current_page = min(st.session_state.prv_cv_page, total_pages - 1)
+
             section_label(
-                f"{len(detections)} frames con texto detectado",
-                right='<span class="mono" style="color:var(--text-4);'
-                      'font-size:11.5px;">click ➕ para añadir como cue'
-                      '</span>',
+                f"{len(detections)} detecciones",
+                right=(
+                    f'<span class="mono" style="color:var(--text-4);'
+                    f'font-size:11.5px;">página {current_page+1}/{total_pages}'
+                    f' · click ➕ para añadir como cue</span>'
+                ),
             )
+
+            # Controles de paginación
+            if total_pages > 1:
+                pag_prev, pag_info, pag_next = st.columns([1, 2, 1], gap="small")
+                with pag_prev:
+                    if st.button("◀ Anterior", use_container_width=True,
+                                 key="prv_cv_page_prev",
+                                 disabled=current_page == 0):
+                        st.session_state.prv_cv_page = max(0, current_page - 1)
+                        st.rerun()
+                with pag_info:
+                    start_idx = current_page * DETECTIONS_PER_PAGE + 1
+                    end_idx = min(start_idx + DETECTIONS_PER_PAGE - 1, len(detections))
+                    st.markdown(
+                        f'<div class="mono" style="text-align:center;'
+                        f'color:var(--text-3);font-size:12px;'
+                        f'margin-top:8px;">Mostrando {start_idx}-{end_idx} '
+                        f'de {len(detections)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                with pag_next:
+                    if st.button("Siguiente ▶", use_container_width=True,
+                                 key="prv_cv_page_next",
+                                 disabled=current_page >= total_pages - 1):
+                        st.session_state.prv_cv_page = min(total_pages - 1, current_page + 1)
+                        st.rerun()
+
+            # Slice de la página actual
+            page_start = current_page * DETECTIONS_PER_PAGE
+            page_end = page_start + DETECTIONS_PER_PAGE
+            page_items = detections[page_start:page_end]
 
             # Galería en filas de 3 columnas
             cols_per_row = 3
-            for i in range(0, len(detections), cols_per_row):
+            for i in range(0, len(page_items), cols_per_row):
                 row_cols = st.columns(cols_per_row, gap="medium")
-                for j, d in enumerate(detections[i:i + cols_per_row]):
+                for j, d in enumerate(page_items[i:i + cols_per_row]):
                     with row_cols[j]:
                         st.image(d["thumbnail"])
-                        plural = "es" if d["n_regions"] > 1 else ""
+                        # Color del badge según confianza
+                        conf = d.get("confidence", 0.0)
+                        if conf >= 0.7:
+                            badge_color = "var(--ok-fg)"
+                            badge_bg = "var(--ok-bg)"
+                        elif conf >= 0.4:
+                            badge_color = "var(--warn-fg)"
+                            badge_bg = "var(--warn-bg)"
+                        else:
+                            badge_color = "var(--err-fg)"
+                            badge_bg = "var(--err-bg)"
+
                         st.markdown(
-                            f'<div class="mono" style="color:var(--text-2);'
-                            f'font-size:12px;margin-top:6px;">'
-                            f'{_format_timestamp(d["timestamp_s"])} · '
-                            f'{d["n_regions"]} región{plural}'
+                            f'<div style="display:flex;justify-content:space-between;'
+                            f'align-items:center;margin-top:6px;">'
+                            f'<span class="mono" style="color:var(--text-2);font-size:12px;">'
+                            f'{_format_timestamp(d["timestamp_s"])}</span>'
+                            f'<span style="background:{badge_bg};color:{badge_color};'
+                            f'font-size:10.5px;font-weight:600;padding:2px 8px;'
+                            f'border-radius:99px;">conf {conf:.2f}</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
+                        # Texto detectado en inglés
+                        st.markdown(
+                            f'<div style="font-size:11.5px;color:var(--text-3);'
+                            f'margin-top:6px;font-family:var(--font-mono);'
+                            f'background:var(--hover-bg);padding:5px 8px;'
+                            f'border-radius:6px;word-break:break-word;">'
+                            f'EN: {escape(d.get("text", ""))}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        # Texto traducido (si Nivel 3 lo generó)
+                        tgt = d.get("text_translated", "")
+                        if tgt:
+                            st.markdown(
+                                f'<div style="font-size:12px;color:var(--text);'
+                                f'margin-top:4px;font-weight:500;'
+                                f'background:var(--info-bg);padding:5px 8px;'
+                                f'border-radius:6px;word-break:break-word;">'
+                                f'ES: {escape(tgt)}</div>',
+                                unsafe_allow_html=True,
+                            )
+
                         if st.button(
                             "➕ Añadir como cue",
                             use_container_width=True,
-                            key=f"prv_cv_add_{i + j}_"
+                            key=f"prv_cv_add_{page_start + i + j}_"
                                 f"{d['timestamp_s']:.2f}",
                         ):
+                            # Pre-rellenamos el dialog con la traducción si existe
+                            # Eso lo hace _dialog_add_cue por defecto si st.session_state
+                            # tiene un "preset_text" — pero como no lo tiene, lo
+                            # mejor es exponer este caso de uso vía un dialog
+                            # específico. Por simplicidad, abrimos el dialog
+                            # estándar con timestamp prellenado; el usuario
+                            # copia el texto traducido manualmente.
+                            st.session_state["prv_cv_preset_text"] = tgt or d.get("text", "")
                             _dialog_add_cue(
                                 live_effective,
                                 default_start_s=d["timestamp_s"],
