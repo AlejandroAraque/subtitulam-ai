@@ -389,12 +389,24 @@ def read_text_in_frames(
 _translate_client: Optional[AsyncOpenAI] = None
 
 
-def _get_translate_client() -> AsyncOpenAI:
+def _get_translate_client() -> Optional[AsyncOpenAI]:
     """Cliente OpenAI singleton para traducción de textos OCR.
-    Separado del cliente principal de `translation_service` por claridad."""
+
+    Devuelve None si no hay OPENAI_API_KEY configurada (en lugar de
+    lanzar excepción). Esto permite que la pestaña Preview siga
+    funcionando aunque el .env no esté cargado o la key falte —
+    simplemente no se traduce y los textos quedan en EN.
+    """
     global _translate_client
     if _translate_client is None:
-        _translate_client = AsyncOpenAI()
+        try:
+            _translate_client = AsyncOpenAI()
+        except Exception as e:
+            logger.warning(
+                "No se pudo inicializar cliente OpenAI para traducción: %s. "
+                "Las detecciones OCR no se pre-traducirán.", e,
+            )
+            return None
     return _translate_client
 
 
@@ -410,6 +422,10 @@ async def translate_detections(
     respuesta esperada es la misma lista en español. Coste estimado:
     ~$0.0001 por 10 textos (negligible).
 
+    Si OPENAI_API_KEY no está configurada o la llamada falla, las
+    detecciones se devuelven con `text_translated` vacío y un aviso
+    en logs — la UI sigue funcionando con los textos en EN.
+
     Args:
         detections: salida de `read_text_in_frames`.
         target_lang: "es" / "es-419" / etc.
@@ -419,6 +435,15 @@ async def translate_detections(
         Las mismas detecciones con un campo nuevo `text_translated`.
     """
     if not detections:
+        return detections
+
+    # Inicializar campo por defecto
+    for d in detections:
+        d.setdefault("text_translated", "")
+
+    client = _get_translate_client()
+    if client is None:
+        # Sin API key → devolver sin traducir (no es error, es config).
         return detections
 
     lang_label = {
@@ -446,7 +471,6 @@ async def translate_detections(
         "comentarios extra."
     )
 
-    client = _get_translate_client()
     try:
         response = await client.chat.completions.create(
             model=model,
@@ -459,11 +483,8 @@ async def translate_detections(
         )
         raw = response.choices[0].message.content or ""
     except Exception as e:
-        logger.warning("translate_detections falló: %s", e)
-        # Devolver detecciones sin traducción en caso de error
-        for d in detections:
-            d.setdefault("text_translated", "")
-        return detections
+        logger.warning("translate_detections llamada al LLM falló: %s", e)
+        return detections  # devuelve sin traducir
 
     # Parsear "N: traducción" línea por línea
     translations: dict[int, str] = {}

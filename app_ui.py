@@ -17,6 +17,12 @@ from typing import Optional
 import pandas as pd
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+# Cargar .env (mismo .env que usa el backend). Sin esto, `uv run streamlit`
+# no inyecta las variables y la traducción OCR (gpt-4o-mini) falla por
+# OPENAI_API_KEY ausente.
+load_dotenv()
 
 # Configurable vía env para que docker-compose pueda apuntar al servicio
 # "backend" en lugar de localhost. Default localhost para dev local sin Docker.
@@ -2002,27 +2008,38 @@ def render_preview():
         unsafe_allow_html=True,
     )
 
-    cfg_col1, cfg_col2, btn_col = st.columns([1.2, 1.2, 1], gap="medium")
+    cfg_col1, cfg_col2, cfg_col3, btn_col = st.columns(
+        [1.1, 1.1, 1.0, 0.9], gap="medium",
+    )
     with cfg_col1:
         interval_s = st.slider(
             "Sample cada N segundos",
             min_value=0.5, max_value=10.0, value=3.0, step=0.5,
             key="prv_cv_interval",
-            help="Menor = más cobertura, más tiempo. ~7-10s por frame a 1080p "
-                 "con lectura completa. Para vídeos largos sube a 5-10s.",
+            help="Menor = más cobertura, más tiempo. ~7-10s por frame a 1080p.",
         )
     with cfg_col2:
         min_conf = st.slider(
             "Confianza mínima",
             min_value=0.0, max_value=1.0, value=0.4, step=0.05,
             key="prv_cv_min_conf",
-            help="Descarta detecciones con confianza menor. 0.4 es buen "
-                 "default; sube a 0.6 para resultados muy fiables.",
+            help="Descarta detecciones con confianza menor. 0.4 buen default.",
+        )
+    with cfg_col3:
+        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+        translate_on = st.toggle(
+            "Pre-traducir (gpt-4o-mini)",
+            value=False,
+            key="prv_cv_translate_on",
+            help="Si activo, traduce los textos detectados a español con "
+                 "gpt-4o-mini (coste ~$0.0001 por video). Si no, los "
+                 "textos se muestran solo en inglés y se traducen a mano "
+                 "al añadirlos como cue.",
         )
     with btn_col:
         st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)
         detect_btn = st.button(
-            "🔍 Detectar y leer texto",
+            "🔍 Detectar texto",
             use_container_width=True,
             key="prv_cv_detect_btn",
             type="secondary",
@@ -2072,14 +2089,25 @@ def render_preview():
             )
 
             # Nivel 3: traducir los textos detectados con gpt-4o-mini
-            if detections:
+            # (opcional — solo si el usuario activó el toggle "Pre-traducir").
+            if detections and translate_on:
                 progress.progress(
                     0.92,
                     text=f"Traduciendo {len(detections)} textos…",
                 )
-                detections = _asyncio.run(
-                    ocr_service.translate_detections(detections)
-                )
+                try:
+                    detections = _asyncio.run(
+                        ocr_service.translate_detections(detections)
+                    )
+                except Exception as e:
+                    # Robusto: si la traducción falla, seguimos con los
+                    # textos en EN. No rompemos la pestaña.
+                    st.warning(
+                        f"No se pudo traducir con gpt-4o-mini: {e}. "
+                        "Las detecciones se mostrarán solo en inglés."
+                    )
+                    for d in detections:
+                        d["text_translated"] = ""
 
             dt = _time.time() - t0
             progress.progress(
