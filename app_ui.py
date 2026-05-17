@@ -1978,6 +1978,141 @@ def render_preview():
                 default_end_s=cue["end_s"] + 2.1,
             )
 
+    # ── Sección Computer Vision: detección de texto en pantalla ────────
+    st.markdown('<div style="height:32px;"></div>', unsafe_allow_html=True)
+    section_label(
+        "Detección de texto en pantalla (CV)",
+        right='<span class="mono" style="color:var(--text-4);font-size:11.5px;">'
+              'EasyOCR · v3.2 nivel 1</span>',
+    )
+    st.markdown(
+        '<div style="font-size:12.5px;color:var(--text-3);'
+        'margin-bottom:14px;line-height:1.6;">'
+        'Analiza el vídeo frame a frame buscando regiones con texto en '
+        'pantalla (letreros, carteles, mensajes, títulos). Útil para '
+        'detectar contenido que NO está en el .srt y que el dialoguista '
+        'tendría que añadir a mano. Todo el procesamiento se hace local '
+        '— el vídeo no sale del servidor.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    cfg_col, btn_col = st.columns([2, 1], gap="medium")
+    with cfg_col:
+        interval_s = st.slider(
+            "Sample cada N segundos",
+            min_value=0.5, max_value=10.0, value=2.0, step=0.5,
+            key="prv_cv_interval",
+            help="Menor = más cobertura, más tiempo. 2s es buen balance.",
+        )
+    with btn_col:
+        st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)
+        detect_btn = st.button(
+            "🔍 Detectar texto en el vídeo",
+            use_container_width=True,
+            key="prv_cv_detect_btn",
+            type="secondary",
+        )
+
+    # Si el usuario sube un vídeo distinto, invalidar detecciones previas
+    current_video_sig = (video_file.name, video_file.size)
+    if st.session_state.get("prv_cv_video_sig") != current_video_sig:
+        st.session_state.prv_cv_detections = None
+        st.session_state.prv_cv_video_sig = current_video_sig
+
+    if detect_btn:
+        import tempfile
+        import time as _time
+        from pathlib import Path as _Path
+        from app.services import ocr_service
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_file.getvalue())
+            tmp_path = tmp.name
+
+        progress = st.progress(
+            0.0, text="Inicializando EasyOCR (primera vez descarga ~150 MB)…",
+        )
+        try:
+            t0 = _time.time()
+            progress.progress(0.05, text="Extrayendo frames del vídeo…")
+            frames = ocr_service.extract_frames(tmp_path, interval_s)
+            progress.progress(
+                0.10,
+                text=f"Frames extraídos: {len(frames)}. Cargando modelos…",
+            )
+
+            def _on_progress(done: int, total: int) -> None:
+                pct = 0.10 + 0.85 * (done / max(total, 1))
+                progress.progress(
+                    pct, text=f"Analizando frame {done}/{total}…",
+                )
+
+            detections = ocr_service.detect_text_in_frames(
+                frames, progress_callback=_on_progress,
+            )
+            dt = _time.time() - t0
+            progress.progress(
+                1.0,
+                text=f"Hecho · {len(detections)} frames con texto · {dt:.1f}s",
+            )
+            st.session_state.prv_cv_detections = detections
+        finally:
+            try:
+                _Path(tmp_path).unlink()
+            except Exception:
+                pass
+
+        st.rerun()  # forzar re-render con los resultados
+
+    # Mostrar resultados si los hay
+    detections = st.session_state.get("prv_cv_detections")
+    if detections is not None:
+        st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+
+        if not detections:
+            empty_state(
+                "🔎",
+                "No se detectó texto en el vídeo",
+                "Prueba con un intervalo más pequeño, o este vídeo no "
+                "tiene texto en pantalla.",
+            )
+        else:
+            section_label(
+                f"{len(detections)} frames con texto detectado",
+                right='<span class="mono" style="color:var(--text-4);'
+                      'font-size:11.5px;">click ➕ para añadir como cue'
+                      '</span>',
+            )
+
+            # Galería en filas de 3 columnas
+            cols_per_row = 3
+            for i in range(0, len(detections), cols_per_row):
+                row_cols = st.columns(cols_per_row, gap="medium")
+                for j, d in enumerate(detections[i:i + cols_per_row]):
+                    with row_cols[j]:
+                        st.image(d["thumbnail"])
+                        plural = "es" if d["n_regions"] > 1 else ""
+                        st.markdown(
+                            f'<div class="mono" style="color:var(--text-2);'
+                            f'font-size:12px;margin-top:6px;">'
+                            f'{_format_timestamp(d["timestamp_s"])} · '
+                            f'{d["n_regions"]} región{plural}'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if st.button(
+                            "➕ Añadir como cue",
+                            use_container_width=True,
+                            key=f"prv_cv_add_{i + j}_"
+                                f"{d['timestamp_s']:.2f}",
+                        ):
+                            _dialog_add_cue(
+                                live_effective,
+                                default_start_s=d["timestamp_s"],
+                                default_end_s=d["timestamp_s"] + 2.5,
+                            )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ROUTER
