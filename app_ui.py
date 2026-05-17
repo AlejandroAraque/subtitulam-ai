@@ -1441,10 +1441,18 @@ def _parse_user_timestamp(s: str) -> float | None:
 
 
 @st.dialog("Añadir nuevo cue")
-def _dialog_add_cue(cues_existing: list[dict]):
+def _dialog_add_cue(
+    cues_existing: list[dict],
+    default_start_s: float | None = None,
+    default_end_s: float | None = None,
+):
     """Modal para crear un cue nuevo. Persiste en st.session_state.prv_added
     como dict {id, start_s, end_s, text}. El SRT exportado fusiona estos
     cues con los originales ordenados por start_s.
+
+    Si se pasan `default_start_s` / `default_end_s` (clic en + de un cue
+    concreto) se usan como valores iniciales; si no, se sugiere arrancar
+    justo tras el último cue existente.
     """
     st.markdown(
         '<div style="font-size:12.5px;color:var(--text-3);margin-bottom:14px;">'
@@ -1454,23 +1462,26 @@ def _dialog_add_cue(cues_existing: list[dict]):
         unsafe_allow_html=True,
     )
 
-    # Sugerencia: arrancar justo tras el último cue existente
-    last_end = max((c["end_s"] for c in cues_existing), default=0.0)
-    default_start = last_end + 0.1
-    default_end   = default_start + 2.0
+    if default_start_s is not None and default_end_s is not None:
+        default_start = default_start_s
+        default_end   = default_end_s
+    else:
+        last_end = max((c["end_s"] for c in cues_existing), default=0.0)
+        default_start = last_end + 0.1
+        default_end   = default_start + 2.0
 
     with st.form("add_cue_form", clear_on_submit=False):
         col_s, col_e = st.columns(2)
         with col_s:
             start_str = st.text_input(
                 "Inicio (HH:MM:SS o segundos)",
-                value=f"{default_start:.2f}",
+                value=_format_srt_timestamp(default_start),
                 help="Formatos aceptados: 00:01:23,500 · 01:23 · 90.5",
             )
         with col_e:
             end_str = st.text_input(
                 "Fin (HH:MM:SS o segundos)",
-                value=f"{default_end:.2f}",
+                value=_format_srt_timestamp(default_end),
             )
         text = st.text_area(
             "Texto del cue",
@@ -1831,23 +1842,24 @@ def render_preview():
                     "Cambia o borra la búsqueda.")
         return
 
-    # Header HTML de la tabla (6 columnas: #, ts, texto, ▶, ✏️, 🗑)
+    # Header HTML de la tabla (7 columnas: #, ts, texto, ▶, ✏️, 🗑, +)
     st.markdown("""
-    <div class="gl-thead-grid" style="grid-template-columns:0.5fr 0.7fr 2.6fr 0.35fr 0.35fr 0.35fr;">
+    <div class="gl-thead-grid" style="grid-template-columns:0.5fr 0.7fr 2.4fr 0.35fr 0.35fr 0.35fr 0.35fr;">
       <div>#</div>
       <div>Timestamp</div>
       <div>Texto</div>
       <div style="text-align:right;">Ir</div>
       <div style="text-align:right;">Editar</div>
       <div style="text-align:right;">Borrar</div>
+      <div style="text-align:right;">Añadir</div>
     </div>
     """, unsafe_allow_html=True)
 
     # Filas de cues
     st.markdown('<div class="gl-rows-marker"></div>', unsafe_allow_html=True)
     for cue in filtered:
-        c_idx, c_ts, c_txt, c_seek, c_edit, c_del = st.columns(
-            [0.5, 0.7, 2.6, 0.35, 0.35, 0.35],
+        c_idx, c_ts, c_txt, c_seek, c_edit, c_del, c_add = st.columns(
+            [0.5, 0.7, 2.4, 0.35, 0.35, 0.35, 0.35],
             gap="small",
             vertical_alignment="center",
         )
@@ -1953,6 +1965,18 @@ def render_preview():
                 st.session_state.prv_edits.pop(cue["index"], None)
                 st.toast(f"Cue #{cue['index']} eliminado.", icon="🗑")
                 st.rerun()
+
+        # Botón + para insertar un cue nuevo justo después de éste
+        if c_add.button("+", key=f"prv_add_after_{ckey}",
+                        help="Insertar un cue nuevo a continuación "
+                             "(timestamps editables en el diálogo)",
+                        use_container_width=True,
+                        disabled=is_deleted):
+            _dialog_add_cue(
+                live_effective,
+                default_start_s=cue["end_s"] + 0.1,
+                default_end_s=cue["end_s"] + 2.1,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
