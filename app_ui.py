@@ -1971,11 +1971,36 @@ def render_preview():
             f'{_format_timestamp(cue["start_s"])}</div>',
             unsafe_allow_html=True,
         )
-        c_txt.markdown(
+        # Texto del cue + mini-etiqueta con el motivo del estado (si lo hay)
+        text_html = (
             f'<div style="font-size:12.8px;color:{text_color};{text_extra}">'
-            f'{escape(cue["text"]).replace(chr(10), "<br>")}</div>',
-            unsafe_allow_html=True,
+            f'{escape(cue["text"]).replace(chr(10), "<br>")}</div>'
         )
+        # Sub-etiqueta con los issues (solo si no está borrado y tiene problemas)
+        if not is_deleted:
+            m = metrics_by_key.get(ckey)
+            if m and m["status"] != "ok" and m["issues"]:
+                badge_bg = {
+                    "warn": "var(--warn-bg)",
+                    "err":  "var(--err-bg)",
+                }.get(m["status"], "var(--hover-bg)")
+                badge_fg = {
+                    "warn": "var(--warn-fg-2)",
+                    "err":  "var(--err-fg-2)",
+                }.get(m["status"], "var(--text-3)")
+                # Mostrar los primeros 2 issues; si hay más, indicar +N
+                shown = m["issues"][:2]
+                extra = len(m["issues"]) - len(shown)
+                issues_text = " · ".join(shown)
+                if extra > 0:
+                    issues_text += f" · +{extra}"
+                text_html += (
+                    f'<div style="display:inline-block;font-size:10.5px;'
+                    f'font-weight:500;color:{badge_fg};background:{badge_bg};'
+                    f'padding:2px 8px;border-radius:99px;margin-top:4px;">'
+                    f'{escape(issues_text)}</div>'
+                )
+        c_txt.markdown(text_html, unsafe_allow_html=True)
         if c_seek.button("▶", key=f"prv_seek_{ckey}",
                          help=f"Saltar a {_format_timestamp(cue['start_s'])}",
                          use_container_width=True,
