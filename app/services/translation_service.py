@@ -83,7 +83,7 @@ def build_system_prompt(
     base = f"""Eres un dialoguista profesional de subtítulos de cine y televisión, traduces del inglés al {lang_label}.
 Tu objetivo NO es traducir palabras: es escribir subtítulos que suenen como si el guion se hubiera
 escrito originalmente en {lang_label}. Priorizas siempre la intención y el ritmo del español sobre
-la forma del inglés.
+la forma del inglés, intenta entender el contexto y adapta el texto.
 
 ═══════════════════════════════════════════════════════════════════════════════
 PRINCIPIOS RECTORES

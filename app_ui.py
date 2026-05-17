@@ -93,6 +93,46 @@ def api_delete_job(job_id: int) -> bool:
         return False
 
 
+def _parse_srt_bytes(srt_bytes: bytes) -> list[dict]:
+    """Parser SRT mínimo: devuelve lista de {index, start_s, end_s, text}.
+
+    Acepta bytes UTF-8 (con o sin BOM) y ambos separadores horarios
+    (',' y '.'). No valida formato estricto; cues malformados se ignoran.
+    """
+    import re as _re
+    text = srt_bytes.decode("utf-8-sig", errors="replace")
+    ts_re = _re.compile(
+        r'(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})\s*-->\s*'
+        r'(\d{2}):(\d{2}):(\d{2})[,\.](\d{3})'
+    )
+    cues = []
+    for blk in _re.split(r'\n\s*\n', text):
+        lines = blk.strip().splitlines()
+        if len(lines) < 3 or not lines[0].strip().isdigit():
+            continue
+        m = ts_re.match(lines[1].strip())
+        if not m:
+            continue
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = map(int, m.groups())
+        start_s = h1*3600 + m1*60 + s1 + ms1/1000
+        end_s   = h2*3600 + m2*60 + s2 + ms2/1000
+        cues.append({
+            "index":   int(lines[0]),
+            "start_s": start_s,
+            "end_s":   end_s,
+            "text":    "\n".join(lines[2:]).strip(),
+        })
+    return cues
+
+
+def _format_timestamp(seconds: float) -> str:
+    """Convierte segundos a 'HH:MM:SS' para mostrar en la UI."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def _build_glossary_csv(glossary: list[dict]) -> bytes:
     """Construye el CSV (BOM UTF-8 + ; separator) localmente desde los
     términos ya cargados en memoria. Evita una segunda llamada HTTP al
@@ -659,6 +699,7 @@ with st.sidebar:
         "Nueva Traducción":  "workspace",
         "Glosario y Reglas": "glosario",
         "Historial":         "historial",
+        "Preview":           "preview",
     }
     labels = list(PAGES.keys())
 
@@ -1162,8 +1203,146 @@ def render_historial():
         st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PÁGINA · PREVIEW (QA visual del .srt traducido sobre el vídeo)
+# ═══════════════════════════════════════════════════════════════════════════
+def render_preview():
+    page_header(
+        "Preview de traducción",
+        "Carga el vídeo y el .srt traducido para previsualizar el resultado "
+        "tal como lo verá el espectador. Sirve para QA antes de entregar al cliente.",
+    )
+
+    # ── Subida de archivos ─────────────────────────────────────────────
+    col_video, col_srt = st.columns(2, gap="medium")
+    with col_video:
+        section_label("Vídeo")
+        video_file = st.file_uploader(
+            "video",
+            type=["mp4", "webm", "mov", "mkv"],
+            label_visibility="collapsed",
+            key="prv_video",
+        )
+        if video_file is not None:
+            sz = video_file.size
+            sz_str = f"{sz/1024:.0f} KB" if sz < 1_048_576 else f"{sz/1_048_576:.1f} MB"
+            st.markdown(
+                f'<div style="font-size:11.5px;color:var(--text-4);margin-top:6px;">'
+                f'{escape(video_file.name)} · {sz_str}</div>',
+                unsafe_allow_html=True,
+            )
+
+    with col_srt:
+        section_label("Subtítulos (.srt)")
+        srt_file = st.file_uploader(
+            "srt",
+            type=["srt"],
+            label_visibility="collapsed",
+            key="prv_srt",
+        )
+        if srt_file is not None:
+            cues_count = len(_parse_srt_bytes(srt_file.getvalue()))
+            st.markdown(
+                f'<div style="font-size:11.5px;color:var(--text-4);margin-top:6px;">'
+                f'{escape(srt_file.name)} · {cues_count} cues</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Estados vacíos ─────────────────────────────────────────────────
+    if video_file is None and srt_file is None:
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+        empty_state(
+            "🎬",
+            "Sube vídeo y subtítulos para empezar",
+            "Acepta .mp4, .webm, .mov, .mkv para vídeo y .srt para subtítulos.",
+        )
+        return
+    if video_file is None:
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+        empty_state("🎬", "Falta el vídeo", "Sube el .mp4 correspondiente al .srt.")
+        return
+    if srt_file is None:
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+        empty_state("📝", "Falta el .srt", "Sube el .srt traducido que quieres revisar.")
+        return
+
+    # ── Reproductor con subtítulos quemados ────────────────────────────
+    srt_bytes = srt_file.getvalue()
+    cues = _parse_srt_bytes(srt_bytes)
+
+    st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
+    section_label(
+        "Reproductor",
+        right=f'<span class="mono" style="color:var(--text-4);font-size:12px;">'
+              f'inicio: {_format_timestamp(st.session_state.get("prv_start_time", 0))}'
+              f'</span>',
+    )
+
+    # start_time se actualiza cuando el usuario hace clic en un cue.
+    # Esto fuerza un re-render del reproductor (Streamlit no expone seek
+    # programático, solo el parámetro de inicio).
+    st.video(
+        video_file,
+        subtitles=srt_bytes,
+        start_time=int(st.session_state.get("prv_start_time", 0)),
+    )
+
+    # ── Lista de cues con scroll-to-time ───────────────────────────────
+    st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
+    section_label(
+        f"Cues",
+        right=f'<span class="mono" style="color:var(--text-4);font-size:12px;">'
+              f'{len(cues)} cues</span>',
+    )
+
+    if not cues:
+        empty_state("📝", "El .srt no tiene cues válidos",
+                    "Comprueba el formato del archivo.")
+        return
+
+    # Header HTML de la tabla de cues
+    st.markdown("""
+    <div class="gl-thead-grid" style="grid-template-columns:0.6fr 0.8fr 3fr 0.4fr;">
+      <div>#</div>
+      <div>Timestamp</div>
+      <div>Texto</div>
+      <div style="text-align:right;">Ir</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Filas de cues
+    st.markdown('<div class="gl-rows-marker"></div>', unsafe_allow_html=True)
+    for cue in cues:
+        c_idx, c_ts, c_txt, c_btn = st.columns(
+            [0.6, 0.8, 3, 0.4],
+            gap="small",
+            vertical_alignment="center",
+        )
+        c_idx.markdown(
+            f'<div class="mono" style="color:var(--text-3);font-size:12px;">'
+            f'{cue["index"]}</div>',
+            unsafe_allow_html=True,
+        )
+        c_ts.markdown(
+            f'<div class="mono" style="color:var(--text-2);font-size:12px;">'
+            f'{_format_timestamp(cue["start_s"])}</div>',
+            unsafe_allow_html=True,
+        )
+        c_txt.markdown(
+            f'<div style="font-size:12.8px;color:var(--text);">'
+            f'{escape(cue["text"]).replace(chr(10), "<br>")}</div>',
+            unsafe_allow_html=True,
+        )
+        if c_btn.button("▶", key=f"prv_seek_{cue['index']}",
+                        help=f"Saltar a {_format_timestamp(cue['start_s'])}",
+                        use_container_width=True):
+            st.session_state.prv_start_time = cue["start_s"]
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ROUTER
 # ═══════════════════════════════════════════════════════════════════════════
 if   st.session_state.page == "workspace": render_workspace()
 elif st.session_state.page == "glosario":  render_glosario()
 elif st.session_state.page == "historial": render_historial()
+elif st.session_state.page == "preview":   render_preview()
