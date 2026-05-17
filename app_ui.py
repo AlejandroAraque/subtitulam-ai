@@ -156,7 +156,7 @@ def _compute_cue_metrics(
     next_cue: dict | None = None,
     cpl_limit: int = 42,
     cps_limit: float = 17.0,
-    min_duration_s: float = 0.833,
+    min_duration_s: float = 0.500,
     max_duration_s: float = 7.0,
     min_gap_s: float = 0.080,
 ) -> dict:
