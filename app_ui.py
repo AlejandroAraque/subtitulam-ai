@@ -793,25 +793,28 @@ def empty_state(icon: str, title: str, sub: str):
 # ═══════════════════════════════════════════════════════════════════════════
 # BACKEND HOOK
 # ═══════════════════════════════════════════════════════════════════════════
-def process_translation(srt_file, context: str, target_lang: str, cpl_limit: int) -> dict:
-    """
-    Envía el .srt al backend con contexto, idioma destino y límite CPL.
-    Devuelve {bytes, filename, metrics} con métricas reales calculadas sobre
-    el SRT traducido (líneas, CPL compliance, idiomas).
+def _process_translation_raw(
+    srt_name: str,
+    srt_bytes: bytes,
+    context: str,
+    target_lang: str,
+    cpl_limit: int,
+) -> dict:
+    """Versión "pura" de process_translation que recibe bytes en vez de un
+    file_uploader. Llamable desde un worker thread (no toca session_state).
     """
     response = requests.post(
         f"{BACKEND_URL}/translate",
-        files={"file": (srt_file.name, srt_file.getvalue(), "text/plain")},
+        files={"file": (srt_name, srt_bytes, "text/plain")},
         data={
             "context":     context,
             "target_lang": target_lang,
             "cpl":         cpl_limit,
         },
-        timeout=300,
+        timeout=600,
     )
     response.raise_for_status()
 
-    # ── Métricas reales calculadas sobre el SRT devuelto ────────────────────
     translated_text = response.content.decode("utf-8", errors="ignore")
     lines = [ln for ln in translated_text.splitlines()
              if ln.strip() and "-->" not in ln and not ln.strip().isdigit()]
@@ -821,13 +824,162 @@ def process_translation(srt_file, context: str, target_lang: str, cpl_limit: int
 
     return {
         "bytes":    response.content,
-        "filename": f"{target_lang}_{srt_file.name}",
+        "filename": f"{target_lang}_{srt_name}",
         "metrics":  {
             "cpl_rate": cpl_rate,
             "lines":    str(n_lines),
             "langs":    f"EN → {target_lang.upper()}",
         },
     }
+
+
+def process_translation(srt_file, context: str, target_lang: str, cpl_limit: int) -> dict:
+    """Wrapper compatible con código antiguo: acepta un file_uploader."""
+    return _process_translation_raw(
+        srt_file.name, srt_file.getvalue(), context, target_lang, cpl_limit,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COLA DE TRADUCCIÓN (in-process, single-user, sin Redis)
+# ═══════════════════════════════════════════════════════════════════════════
+# Patrón: la cola vive en variables del MÓDULO (no st.session_state) para
+# que el worker thread pueda escribir sin causar warnings de Streamlit.
+# Single-user porque el módulo es único por proceso de Streamlit.
+#
+# Para migrar a Redis (multi-user, persistencia) en el futuro: sustituir
+# estas funciones por llamadas a arq/Celery. La UI del Workspace no
+# cambia — sigue llamando a enqueue_translation() y get_queue_snapshot().
+import threading
+import uuid as _queue_uuid
+from copy import deepcopy
+
+_q_lock = threading.Lock()
+_q_pending: list[dict] = []      # jobs encolados, no empezados
+_q_current: Optional[dict] = None  # job en proceso AHORA (o None)
+_q_completed: list[dict] = []    # historial de la sesión
+_q_worker_started = False
+
+
+def _translation_worker_loop() -> None:
+    """Loop infinito: drena la cola uno a uno. Vive en un daemon thread."""
+    global _q_current
+    while True:
+        # Sacar el siguiente job
+        with _q_lock:
+            if _q_pending:
+                _q_current = _q_pending.pop(0)
+                _q_current["status"] = "translating"
+                _q_current["started_at"] = datetime.utcnow().isoformat()
+            else:
+                _q_current = None
+
+        if _q_current is None:
+            time.sleep(1.0)
+            continue
+
+        job = _q_current
+        try:
+            result = _process_translation_raw(
+                job["srt_name"],
+                job["srt_bytes"],
+                job["context"],
+                job["target_lang"],
+                job["cpl_limit"],
+            )
+            with _q_lock:
+                job["status"] = "completed"
+                job["completed_at"] = datetime.utcnow().isoformat()
+                job["result_bytes"] = result["bytes"]
+                job["result_name"]  = result["filename"]
+                job["metrics"]      = result["metrics"]
+                _q_completed.append(job)
+                _q_current = None
+        except Exception as e:
+            with _q_lock:
+                job["status"] = "failed"
+                job["completed_at"] = datetime.utcnow().isoformat()
+                job["error"] = str(e)
+                _q_completed.append(job)
+                _q_current = None
+
+
+def _ensure_worker() -> None:
+    """Arranca el worker una sola vez por proceso."""
+    global _q_worker_started
+    if _q_worker_started:
+        return
+    t = threading.Thread(target=_translation_worker_loop, daemon=True)
+    t.start()
+    _q_worker_started = True
+
+
+def enqueue_translation(
+    srt_file,
+    context: str,
+    target_lang: str,
+    cpl_limit: int,
+) -> str:
+    """Encola un .srt para traducción. Devuelve el id del job."""
+    _ensure_worker()
+    job_id = _queue_uuid.uuid4().hex[:8]
+    job = {
+        "id":          job_id,
+        "srt_name":    srt_file.name,
+        "srt_bytes":   srt_file.getvalue(),
+        "srt_size":    srt_file.size,
+        "context":     context,
+        "target_lang": target_lang,
+        "cpl_limit":   cpl_limit,
+        "status":      "queued",
+        "queued_at":   datetime.utcnow().isoformat(),
+        "started_at":  None,
+        "completed_at": None,
+        "result_bytes": None,
+        "result_name":  None,
+        "metrics":      None,
+        "error":        None,
+    }
+    with _q_lock:
+        _q_pending.append(job)
+    return job_id
+
+
+def get_queue_snapshot() -> dict:
+    """Snapshot inmutable del estado de la cola para renderizar la UI.
+
+    Los bytes del .srt original y del resultado NO se copian (son grandes),
+    se pasa la referencia directa. El caller solo lee.
+    """
+    with _q_lock:
+        return {
+            "pending":   [_shallow_job(j) for j in _q_pending],
+            "current":   _shallow_job(_q_current) if _q_current else None,
+            "completed": [_shallow_job(j) for j in _q_completed],
+        }
+
+
+def _shallow_job(job: dict) -> dict:
+    """Copia ligera del job sin los bytes (que son grandes)."""
+    return {
+        k: v for k, v in job.items()
+        if k not in ("srt_bytes",)  # bytes originales NO se copian
+    }
+
+
+def get_completed_job(job_id: str) -> Optional[dict]:
+    """Devuelve un job completado por id (incluyendo result_bytes)."""
+    with _q_lock:
+        for j in _q_completed:
+            if j["id"] == job_id:
+                return j
+    return None
+
+
+def clear_completed_jobs() -> None:
+    """Borra el historial de la sesión actual. No afecta a SQLite."""
+    with _q_lock:
+        _q_completed.clear()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -873,13 +1025,156 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · WORKSPACE
 # ═══════════════════════════════════════════════════════════════════════════
+def _render_translation_queue() -> bool:
+    """Renderiza el panel de cola de traducción si hay algo activo o
+    completado en la sesión. Devuelve True si hay actividad (current o
+    pending) — la UI usa este flag para auto-refrescar.
+    """
+    snap = get_queue_snapshot()
+    has_activity = bool(snap["current"] or snap["pending"])
+    has_any = has_activity or bool(snap["completed"])
+
+    if not has_any:
+        return False
+
+    st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+    section_label(
+        "Cola de traducción",
+        right=(
+            '<span class="mono" style="color:var(--text-4);font-size:11.5px;">'
+            f'{len(snap["pending"])} pendiente(s) · '
+            f'{1 if snap["current"] else 0} en curso · '
+            f'{len(snap["completed"])} completado(s)</span>'
+        ),
+    )
+
+    # JOB EN CURSO ────────────────────────────────────────────────────
+    cur = snap["current"]
+    if cur:
+        started = cur.get("started_at")
+        elapsed_s = 0.0
+        if started:
+            try:
+                t0 = datetime.fromisoformat(started)
+                elapsed_s = (datetime.utcnow() - t0).total_seconds()
+            except Exception:
+                pass
+        # Estimación grosera del tiempo total esperado: 7 min para .srt típico.
+        # Se usa solo para la barra de progreso visual.
+        expected_s = max(60.0, min(900.0, elapsed_s * 1.5 + 60))
+        pct = int(min(95, elapsed_s / expected_s * 100))
+        elapsed_str = f"{int(elapsed_s // 60)}:{int(elapsed_s % 60):02d}"
+        st.markdown(
+            f'<div style="font-size:12.5px;color:var(--text-2);'
+            f'margin-bottom:4px;display:flex;justify-content:space-between;">'
+            f'<span><b style="color:var(--info-fg);">🔄 Traduciendo</b>  '
+            f'{escape(cur["srt_name"])}</span>'
+            f'<span class="mono" style="color:var(--text-4);">'
+            f'{elapsed_str}</span></div>',
+            unsafe_allow_html=True,
+        )
+        progress_bar(pct, "GPT-4o + RAG + glosario…")
+
+    # PENDIENTES ──────────────────────────────────────────────────────
+    if snap["pending"]:
+        for i, p in enumerate(snap["pending"]):
+            st.markdown(
+                f'<div style="font-size:12.5px;color:var(--text-3);'
+                f'margin:6px 0;display:flex;justify-content:space-between;">'
+                f'<span>⏳ En cola  {escape(p["srt_name"])}</span>'
+                f'<span class="mono">pos. {i + 1}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    # COMPLETADOS DE LA SESIÓN ────────────────────────────────────────
+    if snap["completed"]:
+        st.markdown(
+            '<div style="font-size:11px;color:var(--text-4);'
+            'text-transform:uppercase;letter-spacing:.07em;'
+            'margin:14px 0 6px;font-weight:500;">'
+            'Completados en esta sesión</div>',
+            unsafe_allow_html=True,
+        )
+        for c in reversed(snap["completed"]):  # más recientes primero
+            t0 = c.get("started_at")
+            t1 = c.get("completed_at")
+            took_str = ""
+            if t0 and t1:
+                try:
+                    dt = (datetime.fromisoformat(t1) - datetime.fromisoformat(t0)).total_seconds()
+                    took_str = f" · {int(dt // 60)}:{int(dt % 60):02d}"
+                except Exception:
+                    pass
+            if c["status"] == "completed":
+                # Línea con botón de descarga + botón ver en preview
+                colL, colDL, colPV = st.columns([3.5, 1.2, 0.9], gap="small")
+                with colL:
+                    m = c.get("metrics") or {}
+                    st.markdown(
+                        f'<div style="font-size:12.5px;color:var(--text-2);'
+                        f'margin-top:6px;">'
+                        f'<b style="color:var(--ok-fg);">✅ Listo</b>  '
+                        f'{escape(c["srt_name"])}'
+                        f'<span class="mono" style="color:var(--text-4);'
+                        f'margin-left:8px;">{escape(m.get("lines", "—"))} líneas · '
+                        f'CPL {escape(m.get("cpl_rate", "—"))}{took_str}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                with colDL:
+                    if c.get("result_bytes"):
+                        st.download_button(
+                            "↓ .srt",
+                            data=c["result_bytes"],
+                            file_name=c["result_name"],
+                            mime="text/plain",
+                            use_container_width=True,
+                            key=f"qdl_{c['id']}",
+                        )
+                with colPV:
+                    if st.button("Preview", use_container_width=True,
+                                 key=f"qpv_{c['id']}",
+                                 help="Abrir este SRT en la pestaña Preview"):
+                        # Pasar el .srt resultante al Preview vía session_state
+                        # (Streamlit no admite pre-cargar un file_uploader, así
+                        # que avisamos con un toast — el usuario lo descarga y
+                        # lo sube en Preview manualmente).
+                        st.toast(
+                            "Descarga el .srt y súbelo en la pestaña Preview.",
+                            icon="ℹ️",
+                        )
+            else:  # failed
+                st.markdown(
+                    f'<div style="font-size:12.5px;color:var(--err-fg-2);'
+                    f'margin:6px 0;">'
+                    f'<b style="color:var(--err-fg);">✖ Falló</b>  '
+                    f'{escape(c["srt_name"])}{took_str}<br>'
+                    f'<span class="mono" style="font-size:11px;">'
+                    f'{escape(c.get("error", ""))}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Botón limpiar historial de sesión
+        colCL, _ = st.columns([1, 4])
+        with colCL:
+            if st.button("Limpiar historial", type="secondary",
+                         use_container_width=True, key="qclear"):
+                clear_completed_jobs()
+                st.rerun()
+
+    return has_activity
+
+
 def render_workspace():
     trn_id = f"TRN-{(842 + len(st.session_state.history)):05d}"
     page_header(
         "Nueva Traducción",
-        "Sube tu archivo .srt y tradúcelo con IA, respetando CPL, glosario y contexto narrativo.",
+        "Sube tus .srt y tradúcelos con IA. Puedes encolar varios — se procesan uno a uno.",
         right=f'<span class="st-pill queued mono"><span class="dot"></span>{trn_id}</span>',
     )
+
+    # ── COLA DE TRADUCCIÓN (arriba de todo) ──────────────────────────
+    queue_active = _render_translation_queue()
 
     # Contexto
     section_label("Contexto global")
@@ -889,18 +1184,25 @@ def render_workspace():
         placeholder='Ej: "Breaking Bad" — serie dramática. Walter White, protagonista. No adaptar nombres propios.',
         label_visibility="collapsed",
     )
-    st.markdown('<div class="hint">Este texto se usara como contexto para mejorar la coherencia narrativa.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hint">Este texto se usará como contexto para mejorar la coherencia narrativa. Aplica a TODOS los .srt que encoles juntos.</div>', unsafe_allow_html=True)
 
-    # Archivos
+    # Archivos — ahora multi-upload
     section_label("Archivos")
     col_srt, col_mp4 = st.columns(2, gap="medium")
     with col_srt:
-        st.markdown('<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">Subtítulo .srt <span style="color:#ef4444;">*</span></div>', unsafe_allow_html=True)
-        srt_file = st.file_uploader("srt", type=["srt"], label_visibility="collapsed", key="srt_up")
-        if srt_file:
-            file_pill(srt_file.name, srt_file.size)
+        st.markdown('<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">Subtítulos .srt <span style="color:#ef4444;">*</span> <em style="color:var(--text-4);font-style:normal;">(uno o varios)</em></div>', unsafe_allow_html=True)
+        srt_files = st.file_uploader(
+            "srt",
+            type=["srt"],
+            label_visibility="collapsed",
+            key="srt_up",
+            accept_multiple_files=True,
+        )
+        if srt_files:
+            for f in srt_files:
+                file_pill(f.name, f.size)
     with col_mp4:
-        st.markdown('<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">Vídeo de referencia .mp4 <em style="color:var(--text-4);font-style:normal;">(opcional)</em></div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">Vídeo de referencia .mp4 <em style="color:var(--text-4);font-style:normal;">(opcional, no se traduce)</em></div>', unsafe_allow_html=True)
         mp4_file = st.file_uploader("mp4", type=["mp4"], label_visibility="collapsed", key="mp4_up")
         if mp4_file:
             file_pill(mp4_file.name, mp4_file.size, muted=True)
@@ -915,86 +1217,40 @@ def render_workspace():
     with col_cpl:
         st.session_state.cpl_limit = st.slider("Límite CPL (caracteres por línea)", 30, 50, st.session_state.cpl_limit)
 
-    # CTA
+    # CTA — ahora encola en lugar de procesar síncrono
     st.markdown('<div style="margin-top:18px;"></div>', unsafe_allow_html=True)
+    label = (
+        f"Encolar {len(srt_files)} traducción(es)  →"
+        if srt_files else
+        "Encolar traducción  →"
+    )
     clicked = st.button(
-        "Iniciar Traducción con IA  →",
-        disabled=(srt_file is None or st.session_state.ws_state == "translating"),
+        label,
+        disabled=not srt_files,
         use_container_width=True,
     )
 
-    # Flujo de traducción
-    if clicked and srt_file:
-        st.session_state.ws_state = "translating"
-        st.session_state.ws_error = None
-        st.session_state.ws_result_bytes = None
-
-        stages = [
-            (18, "Analizando contexto…"),
-            (35, "Conectando con GPT-4o…"),
-            (62, "Aplicando glosario RAG…"),
-            (88, "Ajustando CPL…"),
-        ]
-        placeholder = st.empty()
-        for pct, label in stages:
-            with placeholder.container():
-                progress_bar(pct, label)
-            time.sleep(0.25)
-
-        try:
-            with placeholder.container():
-                progress_bar(95, "Finalizando traducción…")
-            result = process_translation(
-                srt_file,
+    if clicked and srt_files:
+        for f in srt_files:
+            enqueue_translation(
+                f,
                 st.session_state.context_global,
                 st.session_state.target_lang,
                 st.session_state.cpl_limit,
             )
-            placeholder.empty()
-            st.session_state.ws_state = "success"
-            st.session_state.ws_result_bytes = result["bytes"]
-            st.session_state.ws_result_name  = result["filename"]
-            st.session_state.ws_metrics      = result["metrics"]
-            # El backend ya persistió el job y sus translations en SQLite
-            # vía save_completed_job() — invalidamos el cache para verlo.
-            api_get_jobs.clear()
-            st.rerun()
-        except requests.exceptions.ConnectionError:
-            placeholder.empty()
-            st.session_state.ws_state = "error"
-            st.session_state.ws_error = "No se puede conectar al backend. Asegúrate de que el servidor está activo."
-        except Exception as exc:
-            placeholder.empty()
-            st.session_state.ws_state = "error"
-            st.session_state.ws_error = str(exc)
-
-    # Resultado
-    if st.session_state.ws_state == "success" and st.session_state.ws_result_bytes:
-        m = st.session_state.ws_metrics or {}
-        banner("ok", "Traducción completada",
-               body=f"Tu archivo está listo. {m.get('lines', '—')} líneas procesadas.")
-        metrics([
-            (m.get("cpl_rate", "—"),  "Tasa CPL",  True),
-            (m.get("lines", "—"),     "Líneas",    True),
-            (m.get("langs", "—"),     "Idiomas",   False),
-        ])
-        st.markdown('<div style="margin-top:14px;"></div>', unsafe_allow_html=True)
-        st.download_button(
-            "↓  Descargar SRT traducido",
-            data=st.session_state.ws_result_bytes,
-            file_name=st.session_state.ws_result_name,
-            mime="text/plain",
-            use_container_width=True,
+        st.toast(
+            f"Encolado(s) {len(srt_files)} archivo(s) en cola.",
+            icon="✅",
         )
+        # Invalidar cache de jobs para que aparezcan en el historial cuando
+        # el backend los persista
+        api_get_jobs.clear()
+        st.rerun()
 
-    if st.session_state.ws_state == "error" and st.session_state.ws_error:
-        banner(
-            "err", "Error en la traducción",
-            body_html=(
-                f'{escape(st.session_state.ws_error)}<br>'
-                f'<span class="mono">uvicorn app.main:app --reload</span>'
-            ),
-        )
+    # Auto-refresh mientras hay traducciones en curso (cada 2.5 s)
+    if queue_active:
+        time.sleep(2.5)
+        st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · GLOSARIO  (v2.4.1 — layout SaaS con modales)
