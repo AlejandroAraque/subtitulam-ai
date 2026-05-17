@@ -145,6 +145,81 @@ def _format_srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _compute_cue_metrics(
+    cue: dict,
+    next_cue: dict | None = None,
+    cpl_limit: int = 42,
+    cps_limit: float = 17.0,
+    min_duration_s: float = 0.833,
+    max_duration_s: float = 7.0,
+    min_gap_s: float = 0.080,
+) -> dict:
+    """Métricas técnicas del cue según convenciones de subtitulado profesional
+    (UNE 153010 + Netflix style guide).
+
+    Returns:
+        dict con:
+          status   : 'ok' | 'warn' | 'err' (peor de las métricas)
+          cpl_max  : int  — longitud de la línea más larga
+          cps      : float — caracteres por segundo
+          duration : float — duración en segundos
+          n_lines  : int  — líneas del cue
+          gap_s    : float | None — gap con el cue siguiente (None si es último)
+          issues   : list[str] — descripciones legibles para tooltip
+    """
+    text = cue["text"]
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    cpl_max = max((len(ln) for ln in lines), default=0)
+    chars = sum(len(ln) for ln in lines)
+    duration = max(cue["end_s"] - cue["start_s"], 0.001)
+    cps = chars / duration
+
+    issues: list[str] = []
+    rank = {"ok": 0, "warn": 1, "err": 2}
+    worst = "ok"
+
+    def _bump(level: str) -> None:
+        nonlocal worst
+        if rank[level] > rank[worst]:
+            worst = level
+
+    if cpl_max > cpl_limit:
+        issues.append(f"CPL {cpl_max} > {cpl_limit}")
+        _bump("warn")
+    if cps > cps_limit:
+        issues.append(f"CPS {cps:.1f} > {cps_limit}")
+        _bump("warn")
+    if duration < min_duration_s:
+        issues.append(f"Dur {duration:.2f}s < {min_duration_s}s")
+        _bump("err")
+    elif duration > max_duration_s:
+        issues.append(f"Dur {duration:.1f}s > {max_duration_s}s")
+        _bump("warn")
+    if len(lines) > 2:
+        issues.append(f"{len(lines)} líneas (máx 2)")
+        _bump("warn")
+
+    gap_s = None
+    if next_cue is not None:
+        gap_s = next_cue["start_s"] - cue["end_s"]
+        if gap_s < 0:
+            issues.append(f"Solapa {abs(gap_s)*1000:.0f}ms con cue siguiente")
+            _bump("err")
+        elif gap_s < min_gap_s:
+            issues.append(f"Gap {gap_s*1000:.0f}ms < {min_gap_s*1000:.0f}ms")
+            _bump("warn")
+
+    return {
+        "status":   worst,
+        "cpl_max":  cpl_max,
+        "cps":      round(cps, 1),
+        "duration": round(duration, 2),
+        "n_lines":  len(lines),
+        "gap_s":    round(gap_s, 3) if gap_s is not None else None,
+        "issues":   issues,
+    }
+
+
 def _build_modified_srt(
     cues: list[dict],
     edits: dict[int, str],
@@ -1423,6 +1498,20 @@ def render_preview():
                 st.toast("Cambios descartados.")
                 st.rerun()
 
+    # ── Precomputar métricas técnicas de cada cue (sobre texto efectivo) ─
+    # Ignora cues eliminados para calcular gap con el "siguiente vivo".
+    live_effective: list[dict] = []
+    for c in cues:
+        if c["index"] in deleted:
+            continue
+        effective_text = edits.get(c["index"], c["text"])
+        live_effective.append({**c, "text": effective_text})
+
+    metrics_by_idx: dict[int, dict] = {}
+    for i, c in enumerate(live_effective):
+        next_c = live_effective[i + 1] if i + 1 < len(live_effective) else None
+        metrics_by_idx[c["index"]] = _compute_cue_metrics(c, next_c)
+
     # ── Caja de búsqueda + título de la lista ──────────────────────────
     st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
 
@@ -1512,9 +1601,27 @@ def render_preview():
             text_extra = ""
             idx_mark = ""
 
+        # Dot de estado (verde/ámbar/rojo) + tooltip con issues
+        if is_deleted:
+            dot_html = ""
+        else:
+            m = metrics_by_idx.get(cue["index"], {"status": "ok", "issues": []})
+            dot_color = {
+                "ok":   "var(--ok-fg)",
+                "warn": "var(--warn-fg)",
+                "err":  "var(--err-fg)",
+            }.get(m["status"], "var(--text-4)")
+            tooltip = " · ".join(m["issues"]) if m["issues"] else "OK"
+            dot_html = (
+                f'<span title="{escape(tooltip)}" '
+                f'style="display:inline-block;width:8px;height:8px;'
+                f'border-radius:50%;background:{dot_color};'
+                f'margin-right:6px;vertical-align:middle;"></span>'
+            )
+
         c_idx.markdown(
             f'<div class="mono" style="color:{idx_color};font-size:12px;font-weight:600;">'
-            f'{cue["index"]}{idx_mark}</div>',
+            f'{dot_html}{cue["index"]}{idx_mark}</div>',
             unsafe_allow_html=True,
         )
         c_ts.markdown(
