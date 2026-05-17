@@ -145,21 +145,32 @@ def _format_srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _build_modified_srt(cues: list[dict], edits: dict[int, str]) -> bytes:
+def _build_modified_srt(
+    cues: list[dict],
+    edits: dict[int, str],
+    deleted: set[int] | None = None,
+) -> bytes:
     """Reconstruye un .srt aplicando las ediciones del usuario sobre los
-    cues originales. `edits` mapea cue_idx → nuevo_texto. Los cues NO
-    editados se preservan idénticos.
+    cues originales. `edits` mapea cue_idx → nuevo_texto. `deleted` es
+    el set de cue_idx omitidos. Los cues NO editados ni eliminados se
+    preservan idénticos. Los índices se renumeran consecutivos para que
+    el SRT final no tenga huecos.
     """
+    deleted = deleted or set()
     parts: list[str] = []
+    new_idx = 1
     for c in cues:
+        if c["index"] in deleted:
+            continue
         text = edits.get(c["index"], c["text"])
-        parts.append(str(c["index"]))
+        parts.append(str(new_idx))
         parts.append(
             f'{_format_srt_timestamp(c["start_s"])} --> '
             f'{_format_srt_timestamp(c["end_s"])}'
         )
         parts.append(text)
-        parts.append("")  # blank line separator
+        parts.append("")
+        new_idx += 1
     return "\n".join(parts).encode("utf-8")
 
 
@@ -1281,6 +1292,8 @@ def _dialog_edit_cue(cue: dict):
 def render_preview():
     # Estado inicial del editor (idempotente)
     st.session_state.setdefault("prv_edits", {})
+    st.session_state.setdefault("prv_deleted", set())
+    st.session_state.setdefault("prv_search", "")
 
     page_header(
         "Preview de traducción",
@@ -1344,11 +1357,12 @@ def render_preview():
     # ── Reproductor con subtítulos quemados ────────────────────────────
     srt_bytes_original = srt_file.getvalue()
     cues = _parse_srt_bytes(srt_bytes_original)
-    edits: dict[int, str] = st.session_state.prv_edits
+    edits:   dict[int, str] = st.session_state.prv_edits
+    deleted: set[int]       = st.session_state.prv_deleted
 
-    # Si hay edits, el reproductor muestra el .srt CORREGIDO.
-    if edits:
-        srt_bytes_effective = _build_modified_srt(cues, edits)
+    # Si hay edits o eliminados, el reproductor muestra el .srt CORREGIDO.
+    if edits or deleted:
+        srt_bytes_effective = _build_modified_srt(cues, edits, deleted)
     else:
         srt_bytes_effective = srt_bytes_original
 
@@ -1369,14 +1383,22 @@ def render_preview():
         start_time=int(st.session_state.get("prv_start_time", 0)),
     )
 
-    # ── Banner de ediciones + botón de descarga ────────────────────────
-    if edits:
+    # ── Banner de cambios + botón de descarga ──────────────────────────
+    if edits or deleted:
         st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
         col_msg, col_dl, col_reset = st.columns([3, 1.2, 0.6], gap="small")
+
+        partes = []
+        if edits:
+            partes.append(f"{len(edits)} editado(s)")
+        if deleted:
+            partes.append(f"{len(deleted)} eliminado(s)")
+        resumen = " · ".join(partes)
+
         with col_msg:
             banner(
                 "ok",
-                f"{len(edits)} cue(s) editado(s)",
+                f"Cambios pendientes: {resumen}",
                 body="Los cambios se aplican en directo al reproductor. "
                      "Descarga el .srt corregido cuando termines.",
             )
@@ -1394,51 +1416,102 @@ def render_preview():
         with col_reset:
             st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
             if st.button("↺", type="secondary",
-                         help="Descartar todas las ediciones",
-                         use_container_width=True, key="prv_reset_edits"):
+                         help="Descartar todos los cambios (ediciones + borrados)",
+                         use_container_width=True, key="prv_reset_all"):
                 st.session_state.prv_edits = {}
-                st.toast("Ediciones descartadas.")
+                st.session_state.prv_deleted = set()
+                st.toast("Cambios descartados.")
                 st.rerun()
 
-    # ── Lista de cues con scroll-to-time + edición ─────────────────────
+    # ── Caja de búsqueda + título de la lista ──────────────────────────
     st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
-    section_label(
-        f"Cues",
-        right=f'<span class="mono" style="color:var(--text-4);font-size:12px;">'
-              f'{len(cues)} cues'
-              f'{" · " + str(len(edits)) + " editado(s)" if edits else ""}'
-              f'</span>',
-    )
+
+    search_col, label_col = st.columns([2, 1.5], gap="medium")
+    with search_col:
+        search_query = st.text_input(
+            "Buscar",
+            value=st.session_state.prv_search,
+            placeholder="🔍   Buscar texto en los cues…",
+            label_visibility="collapsed",
+            key="prv_search_input",
+        )
+        # Sincronizar para persistir entre reruns
+        st.session_state.prv_search = search_query
+
+    # Aplicar filtro de búsqueda (case-insensitive, sobre el texto efectivo)
+    q = (search_query or "").strip().lower()
+    if q:
+        filtered = [
+            c for c in cues
+            if q in edits.get(c["index"], c["text"]).lower()
+        ]
+    else:
+        filtered = cues
+
+    with label_col:
+        n_filt = len(filtered)
+        n_total = len(cues)
+        info = f'{n_filt} de {n_total} cues' if q else f'{n_total} cues'
+        if edits:   info += f' · {len(edits)} editado(s)'
+        if deleted: info += f' · {len(deleted)} eliminado(s)'
+        st.markdown(
+            f'<div class="sl-row" style="margin-top:6px;justify-content:flex-end;">'
+            f'<span class="mono" style="color:var(--text-4);font-size:12px;">{info}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     if not cues:
         empty_state("📝", "El .srt no tiene cues válidos",
                     "Comprueba el formato del archivo.")
         return
 
-    # Header HTML de la tabla de cues (5 columnas: #, ts, texto, ▶, ✏️)
+    if not filtered:
+        empty_state("🔎", "Sin resultados",
+                    "Cambia o borra la búsqueda.")
+        return
+
+    # Header HTML de la tabla (6 columnas: #, ts, texto, ▶, ✏️, 🗑)
     st.markdown("""
-    <div class="gl-thead-grid" style="grid-template-columns:0.5fr 0.8fr 3fr 0.35fr 0.35fr;">
+    <div class="gl-thead-grid" style="grid-template-columns:0.5fr 0.7fr 2.6fr 0.35fr 0.35fr 0.35fr;">
       <div>#</div>
       <div>Timestamp</div>
       <div>Texto</div>
       <div style="text-align:right;">Ir</div>
       <div style="text-align:right;">Editar</div>
+      <div style="text-align:right;">Borrar</div>
     </div>
     """, unsafe_allow_html=True)
 
     # Filas de cues
     st.markdown('<div class="gl-rows-marker"></div>', unsafe_allow_html=True)
-    for cue in cues:
-        c_idx, c_ts, c_txt, c_seek, c_edit = st.columns(
-            [0.5, 0.8, 3, 0.35, 0.35],
+    for cue in filtered:
+        c_idx, c_ts, c_txt, c_seek, c_edit, c_del = st.columns(
+            [0.5, 0.7, 2.6, 0.35, 0.35, 0.35],
             gap="small",
             vertical_alignment="center",
         )
-        is_edited = cue["index"] in edits
+        is_edited  = cue["index"] in edits
+        is_deleted = cue["index"] in deleted
         display_text = edits.get(cue["index"], cue["text"])
 
-        idx_mark = "*" if is_edited else ""
-        idx_color = "var(--ok-fg)" if is_edited else "var(--text-3)"
+        # Estilo según estado del cue
+        if is_deleted:
+            idx_color = "var(--text-4)"
+            text_color = "var(--text-4)"
+            text_extra = "text-decoration:line-through;"
+            idx_mark = "✕"
+        elif is_edited:
+            idx_color = "var(--ok-fg)"
+            text_color = "var(--ok-fg-2)"
+            text_extra = "font-weight:500;"
+            idx_mark = "*"
+        else:
+            idx_color = "var(--text-3)"
+            text_color = "var(--text)"
+            text_extra = ""
+            idx_mark = ""
+
         c_idx.markdown(
             f'<div class="mono" style="color:{idx_color};font-size:12px;font-weight:600;">'
             f'{cue["index"]}{idx_mark}</div>',
@@ -1449,22 +1522,39 @@ def render_preview():
             f'{_format_timestamp(cue["start_s"])}</div>',
             unsafe_allow_html=True,
         )
-        text_color = "var(--ok-fg-2)" if is_edited else "var(--text)"
-        text_weight = "500" if is_edited else "400"
         c_txt.markdown(
-            f'<div style="font-size:12.8px;color:{text_color};font-weight:{text_weight};">'
+            f'<div style="font-size:12.8px;color:{text_color};{text_extra}">'
             f'{escape(display_text).replace(chr(10), "<br>")}</div>',
             unsafe_allow_html=True,
         )
         if c_seek.button("▶", key=f"prv_seek_{cue['index']}",
                          help=f"Saltar a {_format_timestamp(cue['start_s'])}",
-                         use_container_width=True):
+                         use_container_width=True,
+                         disabled=is_deleted):
             st.session_state.prv_start_time = cue["start_s"]
             st.rerun()
         if c_edit.button("✏️", key=f"prv_edit_{cue['index']}",
                          help="Editar texto del cue",
-                         use_container_width=True):
+                         use_container_width=True,
+                         disabled=is_deleted):
             _dialog_edit_cue(cue)
+        # Botón borrar / restaurar (alterna según estado)
+        if is_deleted:
+            if c_del.button("↺", key=f"prv_undel_{cue['index']}",
+                            help="Restaurar este cue",
+                            use_container_width=True):
+                st.session_state.prv_deleted.discard(cue["index"])
+                st.toast(f"Cue #{cue['index']} restaurado.")
+                st.rerun()
+        else:
+            if c_del.button("🗑", key=f"prv_del_{cue['index']}",
+                            help="Eliminar este cue del .srt",
+                            use_container_width=True):
+                st.session_state.prv_deleted.add(cue["index"])
+                # Si tenía edición, también se descarta (era de un cue ya borrado)
+                st.session_state.prv_edits.pop(cue["index"], None)
+                st.toast(f"Cue #{cue['index']} eliminado.", icon="🗑")
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
