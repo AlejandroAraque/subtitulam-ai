@@ -133,6 +133,36 @@ def _format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _format_srt_timestamp(seconds: float) -> str:
+    """Convierte segundos a 'HH:MM:SS,mmm' (formato SRT estándar)."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _build_modified_srt(cues: list[dict], edits: dict[int, str]) -> bytes:
+    """Reconstruye un .srt aplicando las ediciones del usuario sobre los
+    cues originales. `edits` mapea cue_idx → nuevo_texto. Los cues NO
+    editados se preservan idénticos.
+    """
+    parts: list[str] = []
+    for c in cues:
+        text = edits.get(c["index"], c["text"])
+        parts.append(str(c["index"]))
+        parts.append(
+            f'{_format_srt_timestamp(c["start_s"])} --> '
+            f'{_format_srt_timestamp(c["end_s"])}'
+        )
+        parts.append(text)
+        parts.append("")  # blank line separator
+    return "\n".join(parts).encode("utf-8")
+
+
 def _build_glossary_csv(glossary: list[dict]) -> bytes:
     """Construye el CSV (BOM UTF-8 + ; separator) localmente desde los
     términos ya cargados en memoria. Evita una segunda llamada HTTP al
@@ -1205,7 +1235,53 @@ def render_historial():
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · PREVIEW (QA visual del .srt traducido sobre el vídeo)
 # ═══════════════════════════════════════════════════════════════════════════
+@st.dialog("Editar cue")
+def _dialog_edit_cue(cue: dict):
+    """Modal para editar el texto de un cue. Persiste el cambio en
+    st.session_state.prv_edits (dict cue_idx → nuevo_texto)."""
+    st.markdown(
+        f'<div class="mono" style="color:var(--text-3);font-size:12px;">'
+        f'#{cue["index"]}  ·  {_format_timestamp(cue["start_s"])} → '
+        f'{_format_timestamp(cue["end_s"])}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    current = st.session_state.get("prv_edits", {}).get(
+        cue["index"], cue["text"]
+    )
+
+    with st.form(f"edit_cue_form_{cue['index']}", clear_on_submit=False):
+        new_text = st.text_area(
+            "Texto del cue", value=current, height=120,
+            help="Edita el texto que verá el espectador.",
+        )
+        c1, c2 = st.columns(2)
+        cancel = c1.form_submit_button(
+            "Cancelar", type="secondary", use_container_width=True,
+        )
+        save = c2.form_submit_button(
+            "Guardar", use_container_width=True,
+        )
+
+    if cancel:
+        st.rerun()
+    if save:
+        st.session_state.setdefault("prv_edits", {})
+        if new_text.strip() == cue["text"].strip():
+            # Sin cambio real — quitar de edits si lo había (idempotente)
+            st.session_state.prv_edits.pop(cue["index"], None)
+            st.toast(f"Cue #{cue['index']} sin cambios.")
+        else:
+            st.session_state.prv_edits[cue["index"]] = new_text.strip()
+            st.toast(f"Cue #{cue['index']} actualizado.", icon="✅")
+        st.rerun()
+
+
 def render_preview():
+    # Estado inicial del editor (idempotente)
+    st.session_state.setdefault("prv_edits", {})
+
     page_header(
         "Preview de traducción",
         "Carga el vídeo y el .srt traducido para previsualizar el resultado "
@@ -1266,8 +1342,15 @@ def render_preview():
         return
 
     # ── Reproductor con subtítulos quemados ────────────────────────────
-    srt_bytes = srt_file.getvalue()
-    cues = _parse_srt_bytes(srt_bytes)
+    srt_bytes_original = srt_file.getvalue()
+    cues = _parse_srt_bytes(srt_bytes_original)
+    edits: dict[int, str] = st.session_state.prv_edits
+
+    # Si hay edits, el reproductor muestra el .srt CORREGIDO.
+    if edits:
+        srt_bytes_effective = _build_modified_srt(cues, edits)
+    else:
+        srt_bytes_effective = srt_bytes_original
 
     st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
     section_label(
@@ -1282,16 +1365,49 @@ def render_preview():
     # programático, solo el parámetro de inicio).
     st.video(
         video_file,
-        subtitles=srt_bytes,
+        subtitles=srt_bytes_effective,
         start_time=int(st.session_state.get("prv_start_time", 0)),
     )
 
-    # ── Lista de cues con scroll-to-time ───────────────────────────────
+    # ── Banner de ediciones + botón de descarga ────────────────────────
+    if edits:
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+        col_msg, col_dl, col_reset = st.columns([3, 1.2, 0.6], gap="small")
+        with col_msg:
+            banner(
+                "ok",
+                f"{len(edits)} cue(s) editado(s)",
+                body="Los cambios se aplican en directo al reproductor. "
+                     "Descarga el .srt corregido cuando termines.",
+            )
+        with col_dl:
+            st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+            base_name = srt_file.name.rsplit(".", 1)[0]
+            st.download_button(
+                "⬇ Descargar .srt corregido",
+                data=srt_bytes_effective,
+                file_name=f"{base_name}_corregido.srt",
+                mime="text/plain",
+                use_container_width=True,
+                key="prv_download_corrected",
+            )
+        with col_reset:
+            st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+            if st.button("↺", type="secondary",
+                         help="Descartar todas las ediciones",
+                         use_container_width=True, key="prv_reset_edits"):
+                st.session_state.prv_edits = {}
+                st.toast("Ediciones descartadas.")
+                st.rerun()
+
+    # ── Lista de cues con scroll-to-time + edición ─────────────────────
     st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
     section_label(
         f"Cues",
         right=f'<span class="mono" style="color:var(--text-4);font-size:12px;">'
-              f'{len(cues)} cues</span>',
+              f'{len(cues)} cues'
+              f'{" · " + str(len(edits)) + " editado(s)" if edits else ""}'
+              f'</span>',
     )
 
     if not cues:
@@ -1299,27 +1415,33 @@ def render_preview():
                     "Comprueba el formato del archivo.")
         return
 
-    # Header HTML de la tabla de cues
+    # Header HTML de la tabla de cues (5 columnas: #, ts, texto, ▶, ✏️)
     st.markdown("""
-    <div class="gl-thead-grid" style="grid-template-columns:0.6fr 0.8fr 3fr 0.4fr;">
+    <div class="gl-thead-grid" style="grid-template-columns:0.5fr 0.8fr 3fr 0.35fr 0.35fr;">
       <div>#</div>
       <div>Timestamp</div>
       <div>Texto</div>
       <div style="text-align:right;">Ir</div>
+      <div style="text-align:right;">Editar</div>
     </div>
     """, unsafe_allow_html=True)
 
     # Filas de cues
     st.markdown('<div class="gl-rows-marker"></div>', unsafe_allow_html=True)
     for cue in cues:
-        c_idx, c_ts, c_txt, c_btn = st.columns(
-            [0.6, 0.8, 3, 0.4],
+        c_idx, c_ts, c_txt, c_seek, c_edit = st.columns(
+            [0.5, 0.8, 3, 0.35, 0.35],
             gap="small",
             vertical_alignment="center",
         )
+        is_edited = cue["index"] in edits
+        display_text = edits.get(cue["index"], cue["text"])
+
+        idx_mark = "*" if is_edited else ""
+        idx_color = "var(--ok-fg)" if is_edited else "var(--text-3)"
         c_idx.markdown(
-            f'<div class="mono" style="color:var(--text-3);font-size:12px;">'
-            f'{cue["index"]}</div>',
+            f'<div class="mono" style="color:{idx_color};font-size:12px;font-weight:600;">'
+            f'{cue["index"]}{idx_mark}</div>',
             unsafe_allow_html=True,
         )
         c_ts.markdown(
@@ -1327,16 +1449,22 @@ def render_preview():
             f'{_format_timestamp(cue["start_s"])}</div>',
             unsafe_allow_html=True,
         )
+        text_color = "var(--ok-fg-2)" if is_edited else "var(--text)"
+        text_weight = "500" if is_edited else "400"
         c_txt.markdown(
-            f'<div style="font-size:12.8px;color:var(--text);">'
-            f'{escape(cue["text"]).replace(chr(10), "<br>")}</div>',
+            f'<div style="font-size:12.8px;color:{text_color};font-weight:{text_weight};">'
+            f'{escape(display_text).replace(chr(10), "<br>")}</div>',
             unsafe_allow_html=True,
         )
-        if c_btn.button("▶", key=f"prv_seek_{cue['index']}",
-                        help=f"Saltar a {_format_timestamp(cue['start_s'])}",
-                        use_container_width=True):
+        if c_seek.button("▶", key=f"prv_seek_{cue['index']}",
+                         help=f"Saltar a {_format_timestamp(cue['start_s'])}",
+                         use_container_width=True):
             st.session_state.prv_start_time = cue["start_s"]
             st.rerun()
+        if c_edit.button("✏️", key=f"prv_edit_{cue['index']}",
+                         help="Editar texto del cue",
+                         use_container_width=True):
+            _dialog_edit_cue(cue)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
