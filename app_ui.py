@@ -18,6 +18,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit_autorefresh import st_autorefresh
 
 # Cargar .env (mismo .env que usa el backend). Sin esto, `uv run streamlit`
 # no inyecta las variables y la traducción OCR (gpt-4o-mini) falla por
@@ -1264,10 +1265,12 @@ def render_workspace():
         api_get_jobs.clear()
         st.rerun()
 
-    # Auto-refresh mientras hay traducciones en curso (cada 2.5 s)
+    # Auto-refresh vía streamlit-autorefresh (componente JS, no bloquea
+    # el render principal de Streamlit). Sustituye al patrón previo
+    # `time.sleep + st.rerun` que causaba re-renders en cascada y
+    # widgets de otras páginas filtrándose en el Workspace.
     if queue_active:
-        time.sleep(2.5)
-        st.rerun()
+        st_autorefresh(interval=2500, key="cola_autorefresh")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · GLOSARIO  (v2.4.1 — layout SaaS con modales)

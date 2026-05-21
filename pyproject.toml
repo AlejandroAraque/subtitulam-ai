@@ -21,4 +21,5 @@ dependencies = [
     "easyocr>=1.7.2",
     "opencv-python>=4.13.0.92",
     "imageio-ffmpeg>=0.6.0",
+    "streamlit-autorefresh>=1.0.1",
 ]
