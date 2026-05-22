@@ -869,6 +869,7 @@ def _get_queue_state() -> dict:
         "pending":         [],     # jobs encolados, no empezados
         "current":         None,   # job en proceso AHORA (o None)
         "completed":       [],     # historial de la sesión
+        "cancelled_ids":   set(),  # ids de jobs que el usuario pidió cancelar
         "worker_started":  False,
     }
 
@@ -881,16 +882,25 @@ def _translation_worker_loop() -> None:
     """
     state = _get_queue_state()
     while True:
-        # Sacar el siguiente job
+        # Sacar el siguiente job, descartando los que ya estén cancelados
+        # antes de empezar (el usuario pulsó ✖ mientras estaban en cola).
         with state["lock"]:
-            if state["pending"]:
-                job = state["pending"].pop(0)
+            job = None
+            while state["pending"]:
+                candidate = state["pending"].pop(0)
+                if candidate["id"] in state["cancelled_ids"]:
+                    candidate["status"] = "cancelled"
+                    candidate["completed_at"] = datetime.utcnow().isoformat()
+                    state["completed"].append(candidate)
+                    state["cancelled_ids"].discard(candidate["id"])
+                    continue
+                job = candidate
                 job["status"] = "translating"
                 job["started_at"] = datetime.utcnow().isoformat()
                 state["current"] = job
-            else:
+                break
+            if job is None:
                 state["current"] = None
-                job = None
 
         if job is None:
             time.sleep(1.0)
@@ -905,18 +915,33 @@ def _translation_worker_loop() -> None:
                 job["cpl_limit"],
             )
             with state["lock"]:
-                job["status"] = "completed"
-                job["completed_at"] = datetime.utcnow().isoformat()
-                job["result_bytes"] = result["bytes"]
-                job["result_name"]  = result["filename"]
-                job["metrics"]      = result["metrics"]
+                # Si el usuario pidió cancelar mientras se procesaba, NO se
+                # muestra como completed — se marca como cancelled.
+                # Limitación: el coste OpenAI del job actual ya está gastado.
+                if job["id"] in state["cancelled_ids"]:
+                    job["status"] = "cancelled"
+                    job["completed_at"] = datetime.utcnow().isoformat()
+                    state["cancelled_ids"].discard(job["id"])
+                else:
+                    job["status"] = "completed"
+                    job["completed_at"] = datetime.utcnow().isoformat()
+                    job["result_bytes"] = result["bytes"]
+                    job["result_name"]  = result["filename"]
+                    job["metrics"]      = result["metrics"]
                 state["completed"].append(job)
                 state["current"] = None
         except Exception as e:
             with state["lock"]:
-                job["status"] = "failed"
+                # Si fue cancelado durante el request, prefiere la marca
+                # de cancelled sobre la de failed (suele ser cancel desde
+                # cliente lo que rompe la conexión).
+                if job["id"] in state["cancelled_ids"]:
+                    job["status"] = "cancelled"
+                    state["cancelled_ids"].discard(job["id"])
+                else:
+                    job["status"] = "failed"
+                    job["error"] = str(e)
                 job["completed_at"] = datetime.utcnow().isoformat()
-                job["error"] = str(e)
                 state["completed"].append(job)
                 state["current"] = None
 
@@ -998,6 +1023,42 @@ def clear_completed_jobs() -> None:
     state = _get_queue_state()
     with state["lock"]:
         state["completed"].clear()
+
+
+def cancel_job(job_id: str) -> str:
+    """Pide cancelar un job (pendiente o en curso).
+
+    Comportamiento:
+      - Si el job está en `pending`: lo elimina antes de empezar.
+        El worker lo registra como cancelled en completed.
+      - Si el job está en curso (`current`): marca el id en
+        cancelled_ids. El worker NO puede cortar la llamada HTTP a
+        OpenAI en curso (limitación), pero al recibir el resultado
+        lo descarta y registra el job como cancelled en lugar de
+        completed. El coste OpenAI del job actual ya está consumido.
+      - Si el job no existe o ya está terminado: no-op.
+
+    Returns:
+        Status final esperado: 'cancelled_pending' / 'cancelled_in_progress'
+        / 'not_found' / 'already_done'.
+    """
+    state = _get_queue_state()
+    with state["lock"]:
+        # Pendiente: lo añadimos a cancelled_ids para que el worker lo
+        # descarte cuando lo saque de la cola.
+        for p in state["pending"]:
+            if p["id"] == job_id:
+                state["cancelled_ids"].add(job_id)
+                return "cancelled_pending"
+        # En curso: marcamos para que el worker descarte el resultado.
+        if state["current"] and state["current"]["id"] == job_id:
+            state["cancelled_ids"].add(job_id)
+            return "cancelled_in_progress"
+        # Completado o no encontrado
+        for c in state["completed"]:
+            if c["id"] == job_id:
+                return "already_done"
+        return "not_found"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -1082,27 +1143,63 @@ def _render_translation_queue() -> bool:
         expected_s = max(60.0, min(900.0, elapsed_s * 1.5 + 60))
         pct = int(min(95, elapsed_s / expected_s * 100))
         elapsed_str = f"{int(elapsed_s // 60)}:{int(elapsed_s % 60):02d}"
-        st.markdown(
-            f'<div style="font-size:12.5px;color:var(--text-2);'
-            f'margin-bottom:4px;display:flex;justify-content:space-between;">'
-            f'<span><b style="color:var(--info-fg);">🔄 Traduciendo</b>  '
-            f'{escape(cur["srt_name"])}</span>'
-            f'<span class="mono" style="color:var(--text-4);">'
-            f'{elapsed_str}</span></div>',
-            unsafe_allow_html=True,
-        )
-        progress_bar(pct, "GPT-4o + RAG + glosario…")
+
+        info_col, cancel_col = st.columns([5, 0.6], gap="small")
+        with info_col:
+            st.markdown(
+                f'<div style="font-size:12.5px;color:var(--text-2);'
+                f'margin-bottom:4px;display:flex;justify-content:space-between;">'
+                f'<span><b style="color:var(--info-fg);">🔄 Traduciendo</b>  '
+                f'{escape(cur["srt_name"])}</span>'
+                f'<span class="mono" style="color:var(--text-4);">'
+                f'{elapsed_str}</span></div>',
+                unsafe_allow_html=True,
+            )
+            progress_bar(pct, "GPT-4o + RAG + glosario…")
+        with cancel_col:
+            st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+            if st.button(
+                "✖", key=f"qcancel_cur_{cur['id']}",
+                type="secondary", use_container_width=True,
+                help="Cancelar este job. El coste OpenAI del request "
+                     "en curso ya está consumido, pero el resultado se "
+                     "descarta y la cola sigue con el siguiente.",
+            ):
+                cancel_job(cur["id"])
+                st.toast(f"Cancelando '{cur['srt_name']}'…", icon="✖")
+                st.rerun()
 
     # PENDIENTES ──────────────────────────────────────────────────────
     if snap["pending"]:
         for i, p in enumerate(snap["pending"]):
-            st.markdown(
-                f'<div style="font-size:12.5px;color:var(--text-3);'
-                f'margin:6px 0;display:flex;justify-content:space-between;">'
-                f'<span>⏳ En cola  {escape(p["srt_name"])}</span>'
-                f'<span class="mono">pos. {i + 1}</span></div>',
-                unsafe_allow_html=True,
+            info_col, pos_col, cancel_col = st.columns(
+                [4.5, 0.7, 0.5], gap="small",
             )
+            with info_col:
+                st.markdown(
+                    f'<div style="font-size:12.5px;color:var(--text-3);'
+                    f'margin-top:8px;">⏳ En cola  '
+                    f'{escape(p["srt_name"])}</div>',
+                    unsafe_allow_html=True,
+                )
+            with pos_col:
+                st.markdown(
+                    f'<div class="mono" style="text-align:right;'
+                    f'color:var(--text-4);font-size:11.5px;margin-top:10px;">'
+                    f'pos. {i + 1}</div>',
+                    unsafe_allow_html=True,
+                )
+            with cancel_col:
+                st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
+                if st.button(
+                    "✖", key=f"qcancel_pend_{p['id']}",
+                    type="secondary", use_container_width=True,
+                    help="Quitar este job de la cola antes de que empiece",
+                ):
+                    cancel_job(p["id"])
+                    st.toast(f"'{p['srt_name']}' quitado de la cola.",
+                             icon="✖")
+                    st.rerun()
 
     # COMPLETADOS DE LA SESIÓN ────────────────────────────────────────
     if snap["completed"]:
@@ -1161,6 +1258,16 @@ def _render_translation_queue() -> bool:
                             "Descarga el .srt y súbelo en la pestaña Preview.",
                             icon="ℹ️",
                         )
+            elif c["status"] == "cancelled":
+                st.markdown(
+                    f'<div style="font-size:12.5px;color:var(--text-4);'
+                    f'margin:6px 0;">'
+                    f'<b style="color:var(--text-3);">✖ Cancelado</b>  '
+                    f'<span style="text-decoration:line-through;">'
+                    f'{escape(c["srt_name"])}</span>{took_str}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
             else:  # failed
                 st.markdown(
                     f'<div style="font-size:12.5px;color:var(--err-fg-2);'
