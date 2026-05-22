@@ -800,9 +800,13 @@ def _process_translation_raw(
     context: str,
     target_lang: str,
     cpl_limit: int,
+    job_uuid: str = "",
 ) -> dict:
     """Versión "pura" de process_translation que recibe bytes en vez de un
     file_uploader. Llamable desde un worker thread (no toca session_state).
+
+    Si se pasa `job_uuid`, el backend acumula logs por ese id y pueden
+    consultarse en vivo vía GET /jobs/by-uuid/{uuid}/logs.
     """
     response = requests.post(
         f"{BACKEND_URL}/translate",
@@ -811,6 +815,7 @@ def _process_translation_raw(
             "context":     context,
             "target_lang": target_lang,
             "cpl":         cpl_limit,
+            "job_uuid":    job_uuid,
         },
         timeout=600,
     )
@@ -913,6 +918,7 @@ def _translation_worker_loop() -> None:
                 job["context"],
                 job["target_lang"],
                 job["cpl_limit"],
+                job_uuid=job["id"],  # logs en vivo: backend acumula por este uuid
             )
             with state["lock"]:
                 # Si el usuario pidió cancelar mientras se procesaba, NO se
@@ -1023,6 +1029,28 @@ def clear_completed_jobs() -> None:
     state = _get_queue_state()
     with state["lock"]:
         state["completed"].clear()
+
+
+def _fetch_job_logs(job_uuid: str, since: int = 0) -> list[dict]:
+    """GET de logs del backend para el job_uuid dado, desde el seq `since`.
+
+    Tolerante a fallos: si el backend está caído o el endpoint no existe
+    todavía, devuelve [] silenciosamente — no queremos romper la UI por
+    un componente accesorio. El error se loggeará indirectamente porque
+    el job seguirá mostrándose sin logs.
+    """
+    if not job_uuid:
+        return []
+    try:
+        r = requests.get(
+            f"{BACKEND_URL}/jobs/by-uuid/{job_uuid}/logs",
+            params={"since": since},
+            timeout=3,
+        )
+        r.raise_for_status()
+        return r.json().get("logs", [])
+    except Exception:
+        return []
 
 
 def cancel_job(job_id: str) -> str:
@@ -1168,6 +1196,46 @@ def _render_translation_queue() -> bool:
                 cancel_job(cur["id"])
                 st.toast(f"Cancelando '{cur['srt_name']}'…", icon="✖")
                 st.rerun()
+
+        # LOGS EN VIVO ────────────────────────────────────────────────
+        # Polling cada rerun (autorefresh) al backend. No paginamos por
+        # `since` aún — pedimos los últimos N porque MAX_LINES_PER_JOB ya
+        # tope la lista server-side. Simple y robusto.
+        logs = _fetch_job_logs(cur["id"], since=0)
+        with st.expander(
+            f"📜 Logs en vivo · {len(logs)} eventos",
+            expanded=bool(logs),
+        ):
+            if not logs:
+                st.markdown(
+                    '<div style="font-size:12px;color:var(--text-4);font-style:italic;">'
+                    'Esperando primer evento del backend…</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                rows = []
+                for entry in logs[-60:]:  # últimos 60 cabe en la UI sin scroll bruto
+                    ts = datetime.fromtimestamp(entry["ts"]).strftime("%H:%M:%S")
+                    color = {
+                        "info":  "var(--text-2)",
+                        "warn":  "var(--warn-fg)",
+                        "error": "var(--err-fg-2)",
+                    }.get(entry.get("level", "info"), "var(--text-2)")
+                    msg = escape(entry["message"])
+                    rows.append(
+                        f'<div style="font-family:var(--mono);font-size:11.5px;'
+                        f'line-height:1.5;color:{color};">'
+                        f'<span style="color:var(--text-4);">{ts}</span>  '
+                        f'{msg}</div>'
+                    )
+                st.markdown(
+                    '<div style="max-height:240px;overflow-y:auto;'
+                    'background:var(--bg-2);padding:8px 10px;border-radius:6px;'
+                    'border:1px solid var(--border-1);">'
+                    + "".join(rows)
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
 
     # PENDIENTES ──────────────────────────────────────────────────────
     if snap["pending"]:

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core import job_logs
 from app.services import (
     srt_service,
     translation_service,
@@ -37,6 +38,7 @@ async def translate_subtitle(
     target_lang: str = Form("es"),
     cpl: int = Form(38),
     auto_context: bool = Form(False),
+    job_uuid: str = Form(""),  # uuid del frontend para logs en vivo (opcional)
     db: Session = Depends(get_db),
 ):
     """Traduce un .srt con RAG + sliding window, persiste el job y sus cues."""
@@ -49,13 +51,24 @@ async def translate_subtitle(
         text_content = content.decode("utf-8")
         original_subtitles = srt_service.parse_srt(text_content)
         cues_source = {s.index: s.content for s in original_subtitles}
+        job_logs.log(
+            job_uuid,
+            f"📥 SRT recibido · {len(content) / 1024:.1f} KB · "
+            f"{len(cues_source)} cues · cpl={cpl} · {target_lang}",
+        )
 
         # ── 0. Auto-context (opt-in, solo si el usuario no escribió contexto)
         if auto_context and not context.strip():
+            job_logs.log(job_uuid, "🧠 Auto-context: generando contexto a partir del título…")
             context = await context_service.generate_context_from_title(file.filename)
+            job_logs.log(job_uuid, f"🧠 Auto-context listo ({len(context)} caracteres)")
 
         # ── 1. Cargar glosario actual (reglas obligatorias en el prompt) ──
         glossary_terms = [t.to_dict() for t in glossary_service.list_terms(db)]
+        job_logs.log(
+            job_uuid,
+            f"📚 Glosario cargado · {len(glossary_terms)} términos inyectados en el prompt",
+        )
 
         # ── 2. Crear Job pendiente — necesitamos job.id para indexar batch ─
         job = history_service.create_pending_job(
@@ -65,6 +78,7 @@ async def translate_subtitle(
             cpl=cpl,
             context=context,
         )
+        job_logs.log(job_uuid, f"💾 Job persistido en BBDD · id={job.id}")
 
         # ── 3. Traducir con RAG + sliding window + glosario activos ───────
         try:
@@ -78,8 +92,10 @@ async def translate_subtitle(
                 use_rag=True,
                 sliding_window_size=20,
                 glossary=glossary_terms,
+                job_uuid=job_uuid,
             )
         except Exception as e:
+            job_logs.log(job_uuid, f"✖ Error en traducción: {str(e)[:200]}", level="error")
             history_service.fail_job(db, job, str(e))
             raise
 
@@ -107,6 +123,12 @@ async def translate_subtitle(
             cpl_compliance=cpl_compliance,
             tokens_prompt=result["tokens_prompt"],
             tokens_completion=result["tokens_completion"],
+        )
+        job_logs.log(
+            job_uuid,
+            f"✅ Job completado · {result['elapsed_s']:.1f}s · "
+            f"CPL compliance {cpl_compliance}% · "
+            f"tokens prompt={result['tokens_prompt']} completion={result['tokens_completion']}",
         )
 
         return Response(
@@ -267,3 +289,16 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
     if not history_service.delete_job(db, job_id):
         raise HTTPException(status_code=404, detail="Job no encontrado.")
     return Response(status_code=204)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# JOB LOGS  (polling en vivo desde el frontend, por uuid del worker)
+# ══════════════════════════════════════════════════════════════════════════
+@router.get("/jobs/by-uuid/{job_uuid}/logs")
+def get_job_logs_endpoint(job_uuid: str, since: int = 0):
+    """Devuelve los logs acumulados del job con seq >= since.
+
+    El frontend hace polling con `since = último seq visto + 1` para
+    paginar incrementalmente sin recibir las líneas ya pintadas.
+    """
+    return {"logs": job_logs.get(job_uuid, since=since)}

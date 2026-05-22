@@ -5,6 +5,7 @@ import logging
 from typing import Dict
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
+from app.core import job_logs
 from app.utils.text_utils import ajustar_cpl_optimo
 
 load_dotenv()
@@ -448,6 +449,7 @@ async def translate_texts(
     rag_threshold: float = 0.5,
     rag_max_examples: int = 5,
     glossary: list[dict] | None = None,
+    job_uuid: str = "",
 ) -> dict:
     """
     Recibe {index: "texto original"} y devuelve un dict con:
@@ -473,6 +475,7 @@ async def translate_texts(
     t_job_start = time.time()
 
     n_glossary = len(glossary) if glossary else 0
+    n_chunks = (len(items) + chunk_size - 1) // chunk_size
     logger.info(
         "── NUEVO JOB ──  cues=%d · chunk_size=%d · target=%s · cpl=%d · "
         "use_rag=%s · job_id=%s · sliding=%d · glossary=%d · context=%r",
@@ -480,10 +483,17 @@ async def translate_texts(
         use_rag, job_id, sliding_window_size, n_glossary,
         (context[:60] + "…") if len(context) > 60 else context,
     )
+    job_logs.log(
+        job_uuid,
+        f"🚀 Traducción iniciada · {len(items)} cues · {n_chunks} chunks de "
+        f"{chunk_size} · RAG={'on' if use_rag else 'off'} · "
+        f"sliding={sliding_window_size}",
+    )
 
     for i in range(0, len(items), chunk_size):
         bloque = items[i:i + chunk_size]
         batch_label = f"batch {bloque[0][0]}-{bloque[-1][0]}"
+        chunk_idx = i // chunk_size + 1
 
         # ── 1. RAG retrieval ──────────────────────────────────────────────
         rag_examples: list[dict] = []
@@ -515,6 +525,11 @@ async def translate_texts(
             "→ %s · %d cues · %d RAG · %d window",
             batch_label, len(bloque), len(rag_examples), len(recent_window),
         )
+        job_logs.log(
+            job_uuid,
+            f"→ Chunk {chunk_idx}/{n_chunks} (cues {bloque[0][0]}–{bloque[-1][0]}) "
+            f"enviado · {len(rag_examples)} hits RAG · {len(recent_window)} cues de ventana",
+        )
         t_batch_start = time.time()
 
         try:
@@ -537,8 +552,14 @@ async def translate_texts(
                     "← %s · %.2fs · tokens prompt=%d completion=%d",
                     batch_label, dt, usage.prompt_tokens, usage.completion_tokens,
                 )
+                job_logs.log(
+                    job_uuid,
+                    f"← Chunk {chunk_idx}/{n_chunks} ok · {dt:.1f}s · "
+                    f"tokens prompt={usage.prompt_tokens} completion={usage.completion_tokens}",
+                )
             else:
                 logger.info("← %s · %.2fs", batch_label, dt)
+                job_logs.log(job_uuid, f"← Chunk {chunk_idx}/{n_chunks} ok · {dt:.1f}s")
 
             traduccion_bruta = response.choices[0].message.content.strip()
             traducciones_parseadas = parsear_traducciones(traduccion_bruta)
@@ -573,6 +594,11 @@ async def translate_texts(
 
         except Exception as e:
             logger.error("✖ %s · fallo: %s", batch_label, str(e))
+            job_logs.log(
+                job_uuid,
+                f"✖ Chunk {chunk_idx}/{n_chunks} falló: {str(e)[:160]}",
+                level="error",
+            )
             for idx, texto in bloque:
                 translated_dict[idx] = f"[ERROR] {texto}"
 
