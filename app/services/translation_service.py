@@ -209,6 +209,38 @@ REGLAS OPERATIVAS
             ✗ "la persona correcta para preguntar"
             ✓ "la persona a quien preguntar" / "a quien deberías preguntar."
 
+   2.11 ANÁFORA: si ya se mencionó, refiérete con pronombre
+        Cuando un cue anterior mencionó algo específico (un libro, un
+        plato, una idea), el siguiente cue lo retoma con PRONOMBRE o
+        ANÁFORA, no con un demostrativo genérico calcado del inglés.
+        • "It's getting cold." (tras hablar del café)
+            ✗ "Esto se está enfriando."
+            ✓ "Se está enfriando." (omite el demostrativo)
+        • "You have to read this." (tras hablar de la novela)
+            ✗ "Tienes que leer esto."
+            ✓ "Tienes que leerla."
+        • "I'm going to fix it tomorrow." (tras hablar del coche)
+            ✗ "Voy a arreglarlo mañana, esto." (calco)
+            ✓ "Lo arreglo mañana." / "Mañana lo arreglo."
+        Regla práctica: si "this/it/that" se refiere a algo nombrado en
+        los últimos 2 cues, sustituye por la/lo/le; sólo usa "esto/eso"
+        cuando el referente es difuso o se introduce ahí.
+
+   2.12 AUXILIARES MODALES REDUNDANTES en respuestas
+        El "will / would / do / am / can" del inglés en respuestas
+        afirmativas suele ser eco gramatical, no contenido. En español
+        sobra: la respuesta natural es "Sí" / "Claro" / "Seguro".
+        • "Promise you'll come? — I will."
+            → "¿Prometes que vendrás? — Sí." (NO "Sí, lo haré.")
+        • "He loves it. — I bet he does."
+            → "Le encanta. — Seguro." (NO "Sí, seguro que le encanta.")
+        • "Did you finish it? — I did."
+            → "¿Lo terminaste? — Sí." (NO "Sí, lo terminé.")
+        • "Are you coming? — I am."
+            → "¿Vienes? — Sí." (NO "Sí, vengo.")
+        • "Can you swim? — I can."
+            → "¿Sabes nadar? — Sí." (NO "Sí, puedo.")
+
 3. ELIPSIS DEL VERBO COPULATIVO (CRÍTICO)
    En español SIEMPRE aparece "ser" o "estar" en oraciones predicativas.
    Sin excepciones en cabecera de cue.
@@ -259,6 +291,16 @@ REGLAS OPERATIVAS
         El español a menudo los omite. NO traducir por defecto a "Y
         entonces" / "De todas formas" / "Supongo" / "Bueno" en cada cue.
 
+   4.4  DISFLUENCIAS Y REPETICIONES DEL HABLA
+        Si una frase se arranca dos veces ("I-I", "Wh-What"), se
+        reformula de inmediato ("Why are you here? Why are you in my
+        house?"), o se duplica una orden ("Stop! Stop now!"), elimina
+        la repetición y deja SOLO la versión más informativa. Es ruido
+        de actuación oral, no contenido leído.
+        • "I-I don't know." → "No sé." (NO "Yo-Yo no sé.")
+        • "Stop! Stop right now!" → "¡Para ahora mismo!"
+        EXCEPCIÓN: tartamudez consistente del personaje sí se mantiene.
+
 5. ADAPTACIÓN CULTURAL
    Modismos por modismos. No traduzcas literal.
    • "He hit the nail on the head." → "Ha dado en el clavo."
@@ -286,15 +328,38 @@ REGLAS OPERATIVAS
      y a palabras EXTRANJERAS que dejes sin traducir si la convención
      editorial española lo requiere.
 
-8. NO TRADUZCAS
-   • Nombres propios de personas.
-   • Marcas y locales con nombre propio (Starbucks, Penn Station).
-   • Topónimos consolidados en su forma local.
-   • Acrónimos y términos técnicos asentados (firewall, server, software).
-   ATENCIÓN: el adjetivo identitario "Black" referido a personas se
-   TRADUCE como "negro / negra / negros" en texto corrido; "Black" solo
-   se mantiene cuando forma parte de un nombre propio o consigna fija
-   ("Black Lives Matter", "Black Friday").
+8. NO TRADUZCAS (con cuidado: distingue NOMBRE PROPIO de TÉRMINO GENÉRICO)
+
+   8.1  NO se traducen:
+        • Nombres propios de personas.
+        • Marcas y locales con nombre propio (Starbucks, Penn Station,
+          Amazon, Uber, IKEA).
+        • Topónimos consolidados en su forma local.
+        • Acrónimos y términos técnicos asentados (firewall, server,
+          software, login, email).
+
+   8.2  SÍ se traducen (aunque suenen "exóticos" al oído):
+        Los términos GENÉRICOS de variantes regionales del inglés
+        (UK / AU / IRL / NZ / IN) se ADAPTAN al término común español.
+        No son nombres propios, son sustantivos comunes con sabor local.
+        • "choc-top" (AU, helado de cucurucho) → "chocolatina" / "helado"
+        • "lollies" (AU/UK) → "chuches" / "caramelos"
+        • "loo" (UK) → "baño" / "servicio"
+        • "bin" (UK) → "cubo" / "papelera"
+        • "lift" (UK) → "ascensor"
+        • "biscuit" (UK) → "galleta"
+        • "rubbish" (UK) → "basura"
+        • "trolley" (UK) → "carrito"
+        • "flatmate" (UK) → "compañero de piso"
+        • "petrol" (UK) → "gasolina"
+        REGLA DE DECISIÓN: ¿se traduciría en un diccionario bilingüe
+        estándar? Si la respuesta es sí, traduce. "Choc-top" tiene
+        entrada en diccionarios; "Starbucks" no.
+
+   8.3  ATENCIÓN: el adjetivo identitario "Black" referido a personas se
+        TRADUCE como "negro / negra / negros" en texto corrido; "Black"
+        solo se mantiene cuando forma parte de un nombre propio o
+        consigna fija ("Black Lives Matter", "Black Friday").
 
 9. COHERENCIA NARRATIVA (cuando recibas "EJEMPLOS PREVIOS" o "CONTEXTO RECIENTE")
    • Los ejemplos son referencia LÉXICA, no plantilla sintáctica.
@@ -314,8 +379,12 @@ AUTOCHEQUEO ANTES DE EMITIR (en cada cue, no solo al final)
 □ ¿He convertido un imperativo camuflado en descripción literal? (principio A)
 □ ¿He calcado "should be / would be" en hipótesis en lugar de usar el condicional? (regla 2.7)
 □ ¿"Embarazoso / actualmente / eventualmente / pretender"… son lo que quería decir? (regla 2.8)
+□ ¿He usado "esto/eso" donde el referente ya estaba mencionado y bastaba "la/lo/le"? (regla 2.11)
+□ ¿He añadido "lo haré / lo hice / vengo / puedo" como eco del auxiliar inglés? (regla 2.12)
 □ ¿Falta algún "ser/estar" donde el español lo exige? (regla 3)
 □ ¿He traducido literalmente "you know / I mean / Man / Wow"? (regla 4)
+□ ¿He reproducido una disfluencia (I'm-I'm / Where…where / repetición duplicada) que sobra? (regla 4.4)
+□ ¿He dejado en inglés un término genérico que tiene equivalente español (choc-top / loo / lollies)? (regla 8.2)
 
 ═══════════════════════════════════════════════════════════════════════════════
 FORMATO ESTRICTO DE SALIDA
