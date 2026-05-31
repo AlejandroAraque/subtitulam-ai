@@ -132,6 +132,28 @@ def _parse_srt_bytes(srt_bytes: bytes) -> list[dict]:
     return cues
 
 
+def _srt_to_vtt(srt_bytes: bytes) -> bytes:
+    """Convierte SRT a WebVTT para el reproductor HTML5 de st.video.
+
+    El navegador solo soporta WebVTT como pista de subtítulos. Streamlit
+    intenta convertir SRT internamente, pero la conversión falla con
+    silencios (BOM, line endings mixtos, encoding sospechoso) y entonces
+    el botón CC ni siquiera aparece en el reproductor. Hacerlo nosotros
+    explícitamente garantiza una pista válida.
+
+    Diferencias SRT → VTT:
+      - Cabecera "WEBVTT" obligatoria al principio.
+      - Los milisegundos van con punto, no con coma:
+            00:00:01,500 (SRT)  ->  00:00:01.500 (VTT)
+      - Normalizamos line endings a \\n.
+    """
+    import re as _re
+    text = srt_bytes.decode("utf-8-sig", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", text)
+    return ("WEBVTT\n\n" + text).encode("utf-8")
+
+
 def _format_timestamp(seconds: float) -> str:
     """Convierte segundos a 'HH:MM:SS' para mostrar en la UI."""
     h = int(seconds // 3600)
@@ -2080,7 +2102,7 @@ def render_preview():
     # programático, solo el parámetro de inicio).
     st.video(
         video_file,
-        subtitles=srt_bytes_effective,
+        subtitles=_srt_to_vtt(srt_bytes_effective),
         start_time=int(st.session_state.get("prv_start_time", 0)),
     )
 
