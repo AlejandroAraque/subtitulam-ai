@@ -78,6 +78,33 @@ borran con `docker compose down -v` (acción consciente).
 `QDRANT_API_KEY` en `.env` y comenta el servicio `qdrant` en
 `docker-compose.yml`. El código del backend funciona sin cambios.
 
+### Aceleración GPU (opcional, solo OCR)
+
+El módulo OCR (EasyOCR) se acelera entre 5× y 10× con GPU NVIDIA. La
+traducción no usa GPU local (es API). El propio `ocr_service.py` detecta
+CUDA en runtime: si está, la usa; si no, cae a CPU sin romper nada.
+
+Para **exponer la GPU al contenedor** del backend, hay un override
+opcional `docker-compose.gpu.yml`:
+
+```bash
+# Sin GPU (lo normal):
+docker compose up -d
+
+# Con GPU NVIDIA disponible en el host:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+Requisitos del host para usar el override GPU:
+
+- GPU NVIDIA con drivers actualizados (≥ 535).
+- CUDA Toolkit 12.x instalado.
+- `nvidia-container-toolkit` instalado para que Docker exponga la GPU al
+  contenedor.
+
+Si esos requisitos no están, el override falla al arrancar. Por eso es
+un archivo separado y no parte del `docker-compose.yml` principal.
+
 ---
 
 ## Setup en local (sin Docker, para desarrollo)

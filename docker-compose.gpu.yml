@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Override que añade soporte GPU NVIDIA al backend de Subtitulam.
+#
+# Pensado para acelerar el módulo OCR (EasyOCR), que es la única parte del
+# pipeline con cómputo local pesado. La traducción no usa GPU (es API).
+#
+# Requisitos del HOST:
+#   - GPU NVIDIA con drivers actualizados (>= 535 recomendado).
+#   - CUDA Toolkit 12.x instalado.
+#   - nvidia-container-toolkit (para que Docker exponga la GPU al contenedor).
+#
+# Cómo usar:
+#   - SIN GPU (laptop normal, equipo sin NVIDIA):
+#       docker compose up -d
+#
+#   - CON GPU (servidor con 1070, MSI con 1660 Ti, etc.):
+#       docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Si el host no tiene GPU + nvidia-container-toolkit instalado, este archivo
+# da error al arrancar — por eso es un override opcional, no parte del
+# docker-compose.yml principal.
+#
+# El propio ocr_service.py detecta CUDA en runtime: si está disponible la
+# usa, si no cae a CPU sin romper nada. Por tanto este override solo es
+# necesario para EXPONER la GPU al contenedor; sin él, EasyOCR no la ve.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
