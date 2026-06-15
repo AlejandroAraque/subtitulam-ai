@@ -1,0 +1,43 @@
+# CI mínimo: smoke de imports + tests unitarios + build de imágenes Docker.
+#
+# El objetivo no es cobertura exhaustiva sino atrapar las roturas que ya
+# ocurrieron una vez sin que nadie las viera: imports que fallan en limpio,
+# Dockerfiles que no construyen, métricas del TFM con regresiones.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv python install 3.11
+
+      - name: Instalar dependencias
+        run: uv sync --frozen
+
+      - name: Lint (ruff)
+        run: uv run ruff check app/ eval/ scripts/ tests/
+
+      - name: Smoke de imports (sin API key — el cliente OpenAI es lazy)
+        run: uv run python -c "import app.main; print('imports OK')"
+
+      - name: Tests unitarios
+        run: uv run pytest
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build de las imágenes (caza Dockerfiles rotos)
+        run: docker compose build

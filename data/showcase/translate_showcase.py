@@ -7,10 +7,10 @@ el endpoint HTTP.
 Uso básico (legacy, sin RAG ni indexado):
     uv run python data/showcase/translate_showcase.py --version v2.2_pre_rag
 
-Con RAG activo (lee ChromaDB pero no indexa):
+Con RAG activo (lee Qdrant pero no indexa):
     uv run python data/showcase/translate_showcase.py --version v2.3 --rag
 
-Indexar en ChromaDB (modo "warm-up"): crea Job en SQLite + indexa cada batch.
+Indexar en Qdrant (modo "warm-up"): crea Job en SQLite + indexa cada batch.
 Equivale a una llamada real al endpoint /translate:
     uv run python data/showcase/translate_showcase.py --version v2.3_h1 \\
         --srt-path data/showcase/selected/showcase_en_h1.srt --rag --index
@@ -125,7 +125,7 @@ async def main_async(args) -> int:
         )
         print(f"[2/4] Job {job.id} creado en SQLite (modo --index)")
     else:
-        print(f"[2/4] Sin --index: no se persiste Job ni se indexa en ChromaDB")
+        print(f"[2/4] Sin --index: no se persiste Job ni se indexa en Qdrant")
 
     texts_dict = {c["idx"]: c["text"] for c in cues}
     print(f"[3/4] Traduciendo · target={args.target_lang} · cpl={args.cpl} "
@@ -217,10 +217,10 @@ def main() -> int:
     parser.add_argument("--target-lang", default="es")
     parser.add_argument("--cpl", type=int, default=42)
     parser.add_argument("--rag", action="store_true",
-                        help="Activar RAG: queries a ChromaDB en cada batch.")
+                        help="Activar RAG: queries a Qdrant en cada batch.")
     parser.add_argument("--index", action="store_true",
                         help="Crear Job en SQLite e indexar las traducciones "
-                             "en ChromaDB (mismo flujo que /translate).")
+                             "en Qdrant (mismo flujo que /translate).")
     parser.add_argument("--auto-context", action="store_true",
                         help="Generar contexto desde el nombre del archivo "
                              "(via gpt-4o-mini). Solo si --context está vacío.")

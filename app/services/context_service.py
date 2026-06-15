@@ -18,12 +18,7 @@ import logging
 import re
 import time
 
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
-client = AsyncOpenAI()
-
+from app.core.openai_client import get_openai
 
 logger = logging.getLogger("subtitulam.context")
 if not logger.handlers:
@@ -51,9 +46,12 @@ def clean_title(filename: str) -> str:
     """Convierte un nombre de archivo a un título legible para el LLM.
 
     Ejemplos:
-      'BreakingBad_S01E01.srt'      → 'Breaking Bad S01E01'
+      'BreakingBad_S01E01.srt'      → 'BreakingBad S01E01'
       'jakobs.ross.2024.srt'        → 'jakobs ross 2024'
       'OPPENHEIMER [BluRay].srt'    → 'OPPENHEIMER'
+
+    Nota: no separa camelCase ('BreakingBad' queda junto); el LLM lo
+    entiende igual y separar agresivamente rompería siglas tipo 'McQueen'.
     """
     name = _EXT_RE.sub("", filename)
     name = _BRACKETS_RE.sub(" ", name)
@@ -90,7 +88,7 @@ async def generate_context_from_title(filename: str) -> str:
 
     t0 = time.time()
     try:
-        response = await client.chat.completions.create(
+        response = await get_openai().chat.completions.create(
             model=CONTEXT_MODEL,
             messages=[
                 {"role": "system", "content": system_msg},

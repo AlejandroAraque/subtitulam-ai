@@ -33,7 +33,6 @@ import threading
 import time
 from typing import TypedDict
 
-
 # ── Configuración ───────────────────────────────────────────────────────────
 MAX_LINES_PER_JOB = 500        # tras eso, se descarta la línea más antigua
 MAX_BUFFER_AGE_S  = 3600.0     # buffers sin actividad >1h se purgan

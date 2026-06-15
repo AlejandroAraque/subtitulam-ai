@@ -830,6 +830,11 @@ def _process_translation_raw(
     Si se pasa `job_uuid`, el backend acumula logs por ese id y pueden
     consultarse en vivo vía GET /jobs/by-uuid/{uuid}/logs.
     """
+    # timeout=(connect, read): conectar debe ser inmediato (10 s), pero la
+    # respuesta tarda lo que tarde el job entero — el README documenta hasta
+    # 15 min/película, así que 30 min de margen. Con el antiguo timeout=600
+    # cualquier job >10 min se marcaba "failed" en la UI aunque el backend
+    # terminara bien y lo persistiera (dinero gastado, resultado inaccesible).
     response = requests.post(
         f"{BACKEND_URL}/translate",
         files={"file": (srt_name, srt_bytes, "text/plain")},
@@ -839,7 +844,7 @@ def _process_translation_raw(
             "cpl":         cpl_limit,
             "job_uuid":    job_uuid,
         },
-        timeout=600,
+        timeout=(10, 1800),
     )
     response.raise_for_status()
 
@@ -2618,76 +2623,52 @@ def render_preview():
         st.session_state.prv_cv_video_sig = current_video_sig
 
     if detect_btn:
-        import tempfile
+        # El OCR corre en el BACKEND vía HTTP (antes era un import
+        # in-process de app.services, que rompía en Docker: la imagen
+        # del frontend no contiene app/ ni la API key de OpenAI).
+        import base64 as _b64
         import time as _time
-        from pathlib import Path as _Path
-        from app.services import ocr_service
-        import asyncio as _asyncio
+        import uuid as _uuid
 
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            tmp.write(video_file.getvalue())
-            tmp_path = tmp.name
-
-        progress = st.progress(
-            0.0, text="Inicializando EasyOCR (primera vez descarga ~150 MB)…",
-        )
-        try:
-            t0 = _time.time()
-            progress.progress(0.05, text="Extrayendo frames del vídeo…")
-            frames = ocr_service.extract_frames(tmp_path, interval_s)
-            progress.progress(
-                0.10,
-                text=f"Frames extraídos: {len(frames)}. Cargando modelos…",
-            )
-
-            def _on_progress(done: int, total: int) -> None:
-                pct = 0.10 + 0.80 * (done / max(total, 1))
-                progress.progress(
-                    pct, text=f"Leyendo texto frame {done}/{total}…",
+        ocr_uuid = str(_uuid.uuid4())
+        t0 = _time.time()
+        with st.spinner(
+            "Detectando texto en el backend… Esto puede tardar varios "
+            "minutos según la duración del vídeo (primera vez además "
+            "descarga los modelos EasyOCR, ~150 MB)."
+        ):
+            try:
+                r = requests.post(
+                    f"{BACKEND_URL}/ocr/detect",
+                    files={"file": (video_file.name, video_file.getvalue(),
+                                    "application/octet-stream")},
+                    data={
+                        "interval_s":     interval_s,
+                        "min_confidence": min_conf,
+                        "translate":      str(translate_on).lower(),
+                        "job_uuid":       ocr_uuid,
+                    },
+                    timeout=(10, 3600),
                 )
+                r.raise_for_status()
+                raw = r.json().get("detections", [])
+            except requests.exceptions.RequestException as e:
+                st.error(f"OCR falló: {e}")
+                raw = None
 
-            detections = ocr_service.read_text_in_frames(
-                frames,
-                progress_callback=_on_progress,
-                min_confidence=min_conf,
-                filter_subtitle_zone=True,
-            )
-
-            # Nivel 3: traducir los textos detectados con gpt-4o-mini
-            # (opcional — solo si el usuario activó el toggle "Pre-traducir").
-            if detections and translate_on:
-                progress.progress(
-                    0.92,
-                    text=f"Traduciendo {len(detections)} textos…",
-                )
-                try:
-                    detections = _asyncio.run(
-                        ocr_service.translate_detections(detections)
-                    )
-                except Exception as e:
-                    # Robusto: si la traducción falla, seguimos con los
-                    # textos en EN. No rompemos la pestaña.
-                    st.warning(
-                        f"No se pudo traducir con gpt-4o-mini: {e}. "
-                        "Las detecciones se mostrarán solo en inglés."
-                    )
-                    for d in detections:
-                        d["text_translated"] = ""
+        if raw is not None:
+            # Decodificar thumbnails base64 → bytes (mismo shape que antes)
+            detections = []
+            for d in raw:
+                thumb = d.pop("thumbnail_b64", "")
+                d["thumbnail"] = _b64.b64decode(thumb) if thumb else b""
+                detections.append(d)
 
             dt = _time.time() - t0
-            progress.progress(
-                1.0,
-                text=f"Hecho · {len(detections)} textos · {dt:.1f}s",
-            )
+            st.toast(f"OCR: {len(detections)} textos en {dt:.0f}s", icon="🔍")
             st.session_state.prv_cv_detections = detections
             st.session_state.prv_cv_page = 0
-        finally:
-            try:
-                _Path(tmp_path).unlink()
-            except Exception:
-                pass
-
-        st.rerun()  # forzar re-render con los resultados
+            st.rerun()  # forzar re-render con los resultados
 
     # Mostrar resultados si los hay
     detections = st.session_state.get("prv_cv_detections")

@@ -4,6 +4,12 @@
 # Imagen base con uv preinstalado para consistencia con el dev local.
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
+# libGL/libglib: las necesita cv2 (OpenCV) para el endpoint /ocr/detect.
+# bookworm-slim no las trae; sin ellas `import cv2` lanza ImportError.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Instalar dependencias primero (caché de capas: si pyproject/lock no

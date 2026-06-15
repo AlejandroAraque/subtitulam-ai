@@ -2,7 +2,7 @@
 Servicio de embeddings — wrapper sobre OpenAI text-embedding-3-small.
 
 Convierte texto a vector de 1536 dimensiones, útil para:
-  - indexar Translations en ChromaDB (v2.2)
+  - indexar Translations en Qdrant (v3.0; antes ChromaDB)
   - lanzar queries de retrieval semántico (v2.3)
 
 Modelo elegido: text-embedding-3-small
@@ -16,12 +16,7 @@ import logging
 import time
 from typing import List
 
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
-client = AsyncOpenAI()
-
+from app.core.openai_client import get_openai
 
 # ── Logger consistente con translation_service ──────────────────────────────
 logger = logging.getLogger("subtitulam.embeddings")
@@ -51,7 +46,7 @@ async def embed_one(text: str) -> List[float]:
         raise ValueError("embed_one: texto vacío.")
 
     t0 = time.time()
-    response = await client.embeddings.create(
+    response = await get_openai().embeddings.create(
         model=EMBED_MODEL,
         input=[text],
     )
@@ -81,7 +76,7 @@ async def embed_batch(texts: List[str]) -> List[List[float]]:
         raise ValueError("embed_batch: hay textos vacíos en la lista.")
 
     t0 = time.time()
-    response = await client.embeddings.create(
+    response = await get_openai().embeddings.create(
         model=EMBED_MODEL,
         input=texts,
     )

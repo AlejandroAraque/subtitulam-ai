@@ -6,9 +6,9 @@ Job           → un trabajo de traducción (un .srt subido)
 Translation   → una cue individual traducida (FK a Job) — materia prima del RAG en v2
 """
 from datetime import datetime
-from typing import Optional, List
+from typing import List
 
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base

@@ -7,7 +7,18 @@ del glosario en aquellos cues donde el término origen aparece.
 Sirve como **termómetro de v2.4** (inyección del glosario en el prompt):
 si la adherencia no sube respecto a v1.5, la inyección no aporta valor.
 """
+import re
 from typing import Optional
+
+
+def _term_in(term: str, text: str) -> bool:
+    """Matching por palabra completa, no substring.
+
+    Sin límites de palabra, un término corto como "art" matchearía
+    "Start the car" y penalizaría la adherencia injustamente (falso
+    positivo de oportunidad). \\b delimita en los dos extremos.
+    """
+    return re.search(rf"\b{re.escape(term)}\b", text) is not None
 
 
 def compute(
@@ -67,9 +78,9 @@ def compute(
             term_src = term["source"].lower()
             term_tgt = term["target"].lower()
 
-            if term_src in src_low:
+            if _term_in(term_src, src_low):
                 n_opportunities += 1
-                if term_tgt in pred_low:
+                if _term_in(term_tgt, pred_low):
                     n_applied += 1
                 else:
                     missed.append({

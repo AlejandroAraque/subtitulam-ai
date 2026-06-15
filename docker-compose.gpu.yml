@@ -5,9 +5,11 @@
 # pipeline con cómputo local pesado. La traducción no usa GPU (es API).
 #
 # Requisitos del HOST:
-#   - GPU NVIDIA con drivers actualizados (>= 535 recomendado).
-#   - CUDA Toolkit 12.x instalado.
+#   - GPU NVIDIA con drivers recientes (los wheels de torch del lock
+#     traen el runtime CUDA 13, que requiere driver serie R580+; con
+#     drivers más antiguos torch caerá a CPU sin romper).
 #   - nvidia-container-toolkit (para que Docker exponga la GPU al contenedor).
+#   - NO hace falta CUDA Toolkit en el host: los wheels traen el runtime.
 #
 # Cómo usar:
 #   - SIN GPU (laptop normal, equipo sin NVIDIA):

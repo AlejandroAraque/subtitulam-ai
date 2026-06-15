@@ -1,6 +1,6 @@
 """
 Capa de servicio del histórico — persistencia atómica de Jobs y sus
-Translations + indexación en ChromaDB para retrieval futuro (v2.2+).
+Translations + indexación en Qdrant para retrieval futuro (v2.2+).
 """
 import logging
 from typing import Dict, List, Optional
@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.schemas import Job, Translation
-from app.services import rag_service
 
 logger = logging.getLogger("subtitulam.history")
 if not logger.handlers:
@@ -56,7 +55,7 @@ def create_pending_job(
     """Crea un Job en estado 'running' antes de empezar a traducir.
 
     Retorna el job ya con id asignado, para que translate_texts pueda usarlo
-    como clave estable en ChromaDB durante la indexación per-batch.
+    como clave estable en Qdrant durante la indexación per-batch.
     """
     job = Job(
         filename=filename,
@@ -84,9 +83,14 @@ async def complete_job(
     tokens_completion: int,
 ) -> Job:
     """Completa un Job pendiente: inserta sus Translations, actualiza
-    métricas y cambia status a 'completed'. Indexación ChromaDB ya
-    debería estar hecha batch a batch desde translate_texts; aquí
-    re-indexamos como safety net (upsert idempotente).
+    métricas y cambia status a 'completed'.
+
+    La indexación en Qdrant ocurre batch a batch desde translate_texts
+    (que además filtra las cues '[ERROR]'). Aquí NO se re-indexa: el
+    antiguo "safety net" re-embebía el archivo entero al cerrar cada
+    job (~1.200 requests duplicados por película) y, al no filtrar
+    '[ERROR]', contaminaba el corpus RAG con cues fallidas. Para
+    recuperar una indexación rota existe scripts/backfill_qdrant.py.
     """
     try:
         # Actualizar métricas en el Job
@@ -112,29 +116,6 @@ async def complete_job(
     except Exception:
         db.rollback()
         raise
-
-    # Safety net: re-indexar en ChromaDB. Idempotente por composite ID.
-    try:
-        translations_for_index = [
-            {
-                "cue_idx":     t.cue_idx,
-                "source_text": t.source_text,
-                "target_text": t.target_text,
-                "target_lang": job.target_lang,
-            }
-            for t in job.translations
-        ]
-        n = await rag_service.add_translations(
-            job_id=job.id,
-            translations=translations_for_index,
-            filename=job.filename,
-        )
-        logger.info("Job %d · re-indexación safety: %d translations", job.id, n)
-    except Exception as e:
-        logger.warning(
-            "Job %d · re-indexación safety falló (no bloqueante): %s",
-            job.id, e,
-        )
 
     return job
 

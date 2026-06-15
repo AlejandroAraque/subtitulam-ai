@@ -1,7 +1,7 @@
 [project]
 name = "ai-subtitle-translator"
-version = "0.1.0"
-description = "Add your description here"
+version = "3.5.0"
+description = "Subtitulam — traducción asistida de subtítulos con GPT-4o, RAG (Qdrant), glosario activo y OCR de texto en frames"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,10 +16,29 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "sacrebleu>=2.6.0",
     "datasets>=4.8.5",
-    "chromadb>=1.5.8",
     "qdrant-client>=1.17.1",
     "easyocr>=1.7.2",
     "opencv-python>=4.13.0.92",
     "imageio-ffmpeg>=0.6.0",
     "streamlit-autorefresh>=1.0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+# app_ui.py tiene ~64 líneas >100 por HTML embebido; se irá limpiando
+# al modularizar la UI. Mientras tanto el linter cubre el backend.
+exclude = ["app_ui.py", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]   # errores, pyflakes, warnings, isort
+ignore = ["E501"]                # línea larga: lo gestiona line-length informativamente
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

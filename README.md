@@ -97,8 +97,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 Requisitos del host para usar el override GPU:
 
-- GPU NVIDIA con drivers actualizados (≥ 535).
-- CUDA Toolkit 12.x instalado.
+- GPU NVIDIA con drivers recientes (los wheels de torch traen el runtime
+  CUDA, no hace falta instalar el CUDA Toolkit en el host).
 - `nvidia-container-toolkit` instalado para que Docker exponga la GPU al
   contenedor.
 
@@ -124,9 +124,8 @@ cp .env.example .env
 # edita .env y pon tu OPENAI_API_KEY=sk-...
 
 # 4. Arrancar Qdrant en Docker (necesario — ya no usamos vector store embebido)
-docker run -d --name subtitulam-qdrant -p 6333:6333 \
-    -v $(pwd)/data/qdrant_storage:/qdrant/storage \
-    qdrant/qdrant:latest
+#    Reutiliza el servicio del compose: funciona igual en bash y PowerShell.
+docker compose up -d qdrant
 
 # 5. Arrancar el backend (puerto 8000)
 uv run uvicorn app.main:app --reload
@@ -202,14 +201,21 @@ Flags relevantes:
 ### Evaluación (BLEU / chrF / CPL / glossary)
 
 ```bash
-uv run python -m eval.runner \
-    --dataset opus100 \
-    --n-samples 50 \
-    --rag
+# Evaluación sobre testset (ver flags disponibles con --help)
+uv run python -m eval --help
+uv run python -m eval --config baseline --rag
+
+# A/B contra una traducción humana profesional (alineación temporal
+# automática entre EN original / ES humano / ES sistema):
+uv run python eval/eval_against_human.py <salida_ia.srt> \
+    --en <original_en.srt> --hum <referencia_humana.srt>
+
+# Re-traducción offline sin RAG (para A/B de prompts sin contaminación):
+uv run python eval/retranslate_offline.py <original_en.srt> -o <salida.srt>
 ```
 
-Resultados en `logs/eval/`. Para ablación entre configuraciones, lanzar
-varias veces con diferentes flags y comparar.
+Resultados en `data/eval_runs/`. Para ablación entre configuraciones,
+lanzar varias veces con diferentes flags y comparar.
 
 ---
 
@@ -218,30 +224,41 @@ varias veces con diferentes flags y comparar.
 ```
 app/
 ├── main.py                  # Entry point FastAPI + lifespan
-├── api/routes.py            # Endpoints: /translate, /glossary, /jobs
-├── core/database.py         # SQLAlchemy + init_db
-├── models/schemas.py        # GlossaryTerm, Job, Translation
+├── api/routes.py            # Endpoints: /translate, /glossary, /jobs, /ocr
+├── core/
+│   ├── config.py            # configuración central (modelo, CPL, Qdrant, versión)
+│   ├── database.py          # SQLAlchemy + init_db
+│   ├── job_logs.py          # buffer de logs en vivo por job (polling UI)
+│   └── openai_client.py     # cliente AsyncOpenAI singleton lazy
+├── models/schemas.py        # GlossaryTerm, Job, Translation (ORM)
 ├── services/
 │   ├── translation_service.py    # build_system_prompt, translate_texts
 │   ├── glossary_service.py       # CRUD + import_csv_rows
 │   ├── rag_service.py            # Qdrant wrapper (query + index)
-│   ├── embedding_service.py      # OpenAI embeddings
+│   ├── embeddings_service.py     # OpenAI embeddings (one + batch)
 │   ├── context_service.py        # auto-context con gpt-4o-mini
-│   └── history_service.py        # lifecycle de jobs
-└── utils/text_utils.py      # ajustar_cpl_optimo, srt parsing
+│   ├── history_service.py        # lifecycle de jobs
+│   ├── srt_service.py            # parseo/rebuild de SRT (librería srt)
+│   └── ocr_service.py            # EasyOCR + OpenCV (texto en frames)
+└── utils/text_utils.py      # ajustar_cpl_optimo
 
 app_ui.py                    # Frontend Streamlit (single file)
 
+tests/                       # tests unitarios (pytest): métricas, parsers, CPL
+
 docker/
-├── Dockerfile.backend       # imagen del backend (FastAPI + uvicorn)
+├── Dockerfile.backend       # imagen del backend (FastAPI + uvicorn + libGL)
 └── Dockerfile.frontend      # imagen del frontend (Streamlit)
 
 docker-compose.yml           # stack de 3 servicios (qdrant + backend + frontend)
+docker-compose.gpu.yml       # override opcional: GPU NVIDIA para el OCR
 .env.example                 # plantilla de variables de entorno
+LICENSE                      # MIT
 
 data/
 ├── qdrant_storage/          # vector store local sin Docker (gitignored)
 ├── subtitulam.db            # SQLite local sin Docker (gitignored)
+├── eval_runs/               # resultados de evaluación (gitignored)
 ├── showcase/
 │   ├── selected/            # SRTs canónicos para tests
 │   ├── raw/                 # SRTs de prueba personales (gitignored)
@@ -252,11 +269,15 @@ scripts/
 └── backfill_qdrant.py       # re-indexa SQLite → Qdrant (idempotente)
 
 eval/
-├── runner.py                # evaluación BLEU/chrF sobre dataset
-├── cli.py                   # entry point CLI
+├── runner.py                # evaluación BLEU/chrF sobre testset
+├── cli.py                   # entry point CLI (python -m eval)
 ├── config.py                # configs de evaluación
 ├── metrics/                 # implementaciones BLEU/chrF/CPL/glossary
+├── eval_against_human.py    # A/B tripartito EN / humano / IA
+├── retranslate_offline.py   # re-traducción sin RAG para A/B de prompts
 └── showcase_diff.py         # diff comparativo de runs del showcase
+
+.github/workflows/ci.yml     # CI: lint + smoke imports + tests + docker build
 ```
 
 ---
@@ -272,9 +293,12 @@ eval/
 | `QDRANT_API_KEY` | no | (vacío) | Solo si usas **Qdrant Cloud** en lugar de self-hosted |
 | `BACKEND_URL` | no | `http://localhost:8000` (local) / `http://backend:8000` (Docker compose) | URL que el frontend usa para hablar con el backend |
 | `DATABASE_URL` | no | `sqlite:///data/subtitulam.db` (local) / `sqlite:////app/data/subtitulam.db` (Docker compose) | Override para Postgres si migras |
-
-El resto de configuración (modelo, temperatura, batch size, etc.) vive en
-código o como flags del script CLI.
+| `OPENAI_MODEL` | no | `gpt-4o` | Modelo de traducción (útil para ablations) |
+| `OPENAI_TEMPERATURE` | no | `0.3` | Temperatura de la traducción |
+| `OPENAI_MAX_TOKENS` | no | `800` | Máx tokens de respuesta por chunk |
+| `DEFAULT_CHUNK_SIZE` | no | `5` | Cues por llamada al LLM |
+| `DEFAULT_CPL_LIMIT` | no | `38` | Límite de caracteres por línea (38 = UNE 153010 TV; 42 = Netflix) |
+| `DEFAULT_TARGET_LANG` | no | `es` | Idioma destino por defecto |
 
 ### Reseteo de la base de datos
 
@@ -315,9 +339,10 @@ A partir de Tier 2 (TPM 450 000/min) el paralelismo es seguro.
 - **gpt-4o con prompts >3 000 tokens tiene variabilidad** entre runs
   aparentemente idénticos (`temperature=0.3`). Algunos cues pueden
   traducirse de forma distinta en ejecuciones consecutivas.
-- **Sin BLEU/chrF sobre material real**. Las métricas rigurosas se calculan
-  solo sobre OPUS-100 (corpus académico). Sobre películas reales la
-  evaluación es cualitativa (diff con baseline + glossary compliance + CPL).
+- **Evaluación sobre material real con N pequeño**. Además de OPUS-100
+  (corpus académico), hay BLEU/chrF contra traducción humana profesional
+  vía `eval/eval_against_human.py`, pero de momento sobre un único corto;
+  ampliar el dataset de referencia humana es trabajo en curso.
 - **No hay multi-tenant ni auth**. Es una herramienta personal local.
   Para uso comercial habría que migrar SQLite → Postgres y añadir auth.
 

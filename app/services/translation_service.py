@@ -1,15 +1,12 @@
-import os
+import logging
 import re
 import time
-import logging
 from typing import Dict
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
-from app.core import job_logs
-from app.utils.text_utils import ajustar_cpl_optimo
 
-load_dotenv()
-client = AsyncOpenAI()
+from app.core import job_logs
+from app.core.config import OPENAI_MAX_TOKENS, OPENAI_MODEL, OPENAI_TEMPERATURE
+from app.core.openai_client import get_openai
+from app.utils.text_utils import ajustar_cpl_optimo
 
 # ── Logger configurado para trazar cada batch ───────────────────────────────
 logger = logging.getLogger("subtitulam.translation")
@@ -419,7 +416,7 @@ def build_user_prompt(
 
     Args:
         batch_items: lista de (cue_idx, source_text) a traducir AHORA.
-        rag_examples: ejemplos retrievados de ChromaDB. Cada dict con keys
+        rag_examples: ejemplos retrievados de Qdrant. Cada dict con keys
             'source_text' y 'target_text'. Si None o vacío, no se incluye
             el bloque.
         recent_window: traducciones recientes del MISMO archivo, en orden
@@ -479,15 +476,24 @@ async def _retrieve_for_batch(
     k: int,
     threshold: float,
     max_total: int,
+    exclude_job_id: int | None = None,
 ) -> list[dict]:
-    """RAG: query ChromaDB para cada cue del batch, dedup por source_text,
-    devuelve los top max_total ordenados por similitud descendente."""
-    from app.services import rag_service  # import local: rompe ciclo
+    """RAG: query Qdrant para cada cue del batch, dedup por source_text,
+    devuelve los top max_total ordenados por similitud descendente.
+
+    exclude_job_id: descarta hits del job en curso. Sin esto, desde el
+    chunk 2 el RAG recupera cues del MISMO archivo que ya van (mejor
+    formateadas) en la sliding window — ejemplos redundantes que roban
+    sitio a los hits de OTROS archivos, que es el propósito del RAG.
+    """
+    from app.services import rag_service
     seen: set[str] = set()
     results: list[dict] = []
     for _, src in batch_items:
         try:
-            hits = await rag_service.query_similar(src, k=k)
+            hits = await rag_service.query_similar(
+                src, k=k, exclude_job_id=exclude_job_id,
+            )
         except Exception as e:
             logger.warning("RAG query falló para cue: %s", e)
             continue
@@ -572,6 +578,7 @@ async def translate_texts(
                 k=rag_top_k,
                 threshold=rag_threshold,
                 max_total=rag_max_examples,
+                exclude_job_id=job_id,
             )
 
         # ── 2. Sliding window: últimas N traducciones del MISMO job ───────
@@ -602,14 +609,14 @@ async def translate_texts(
         t_batch_start = time.time()
 
         try:
-            response = await client.chat.completions.create(
-                model="gpt-4o",
+            response = await get_openai().chat.completions.create(
+                model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
                 ],
-                temperature=0.3,
-                max_tokens=800,
+                temperature=OPENAI_TEMPERATURE,
+                max_tokens=OPENAI_MAX_TOKENS,
             )
 
             dt = time.time() - t_batch_start
@@ -636,7 +643,7 @@ async def translate_texts(
             for idx, texto_trad in traducciones_parseadas.items():
                 translated_dict[idx] = ajustar_cpl_optimo(texto_trad, max_cpl=cpl_limit)
 
-            # ── 4. Indexar este batch en ChromaDB (solo si full mode) ─────
+            # ── 4. Indexar este batch en Qdrant (solo si full mode) ───────
             if use_rag and job_id is not None:
                 from app.services import rag_service  # import local
                 to_index = [

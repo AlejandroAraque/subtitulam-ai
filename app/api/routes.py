@@ -1,20 +1,19 @@
 import csv
 import io
-from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
 from app.core import job_logs
+from app.core.database import get_db
 from app.services import (
-    srt_service,
-    translation_service,
+    context_service,
     glossary_service,
     history_service,
-    context_service,
+    srt_service,
+    translation_service,
 )
 
 router = APIRouter()
@@ -25,7 +24,8 @@ router = APIRouter()
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/")
 def root():
-    return {"message": "API lista para traducir con GPT-4o 🤖", "version": "1.5.0"}
+    from app.core.config import APP_VERSION
+    return {"message": "API lista para traducir con GPT-4o 🤖", "version": APP_VERSION}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -302,3 +302,105 @@ def get_job_logs_endpoint(job_uuid: str, since: int = 0):
     paginar incrementalmente sin recibir las líneas ya pintadas.
     """
     return {"logs": job_logs.get(job_uuid, since=since)}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# OCR  (detección y lectura de texto incrustado en frames de vídeo)
+# ══════════════════════════════════════════════════════════════════════════
+_VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
+_MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+
+
+@router.post("/ocr/detect")
+def ocr_detect(
+    file: UploadFile = File(...),
+    interval_s: float = Form(3.0, ge=0.5, le=60.0),
+    min_confidence: float = Form(0.4, ge=0.0, le=1.0),
+    translate: bool = Form(False),
+    job_uuid: str = Form(""),
+):
+    """Detecta y lee texto incrustado en los frames de un vídeo.
+
+    Endpoint síncrono a propósito: FastAPI lo ejecuta en su threadpool,
+    así el OCR (CPU/GPU-bound, minutos) no bloquea el event loop y el
+    polling de logs sigue respondiendo. El progreso por frame se publica
+    en job_logs bajo `job_uuid` (mismo mecanismo que la traducción).
+
+    Devuelve detecciones con thumbnail JPEG como base64 (el shape es el
+    de ocr_service.read_text_in_frames, serializado para HTTP).
+    """
+    import asyncio
+    import base64
+    import tempfile
+    from pathlib import Path as _Path
+
+    from app.services import ocr_service
+
+    if not file.filename.lower().endswith(_VIDEO_EXTENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato no soportado. Acepta: {', '.join(_VIDEO_EXTENSIONS)}",
+        )
+
+    content = file.file.read()
+    if len(content) > _MAX_VIDEO_BYTES:
+        raise HTTPException(status_code=413, detail="Vídeo demasiado grande (máx 2 GB).")
+
+    job_logs.log(job_uuid, f"📥 Vídeo recibido · {len(content) / 1024 / 1024:.1f} MB")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=_Path(file.filename).suffix,
+                                         delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        del content  # liberar la copia en RAM cuanto antes
+
+        job_logs.log(job_uuid, f"🎞 Extrayendo frames (1 cada {interval_s:.1f}s)…")
+        frames = ocr_service.extract_frames(tmp_path, interval_s)
+        job_logs.log(job_uuid, f"🎞 {len(frames)} frames extraídos · cargando EasyOCR…")
+
+        def _on_progress(done: int, total: int) -> None:
+            if done == 1 or done % 10 == 0 or done == total:
+                job_logs.log(job_uuid, f"🔍 OCR frame {done}/{total}")
+
+        detections = ocr_service.read_text_in_frames(
+            frames,
+            progress_callback=_on_progress,
+            min_confidence=min_confidence,
+            filter_subtitle_zone=True,
+        )
+        job_logs.log(job_uuid, f"🔍 OCR completo · {len(detections)} frames con texto")
+
+        if detections and translate:
+            job_logs.log(job_uuid, f"🌐 Traduciendo {len(detections)} textos (gpt-4o-mini)…")
+            try:
+                # Estamos en un worker thread del threadpool (def síncrono):
+                # no hay event loop aquí, asyncio.run es seguro.
+                detections = asyncio.run(ocr_service.translate_detections(detections))
+            except Exception as e:
+                job_logs.log(job_uuid, f"⚠ Traducción OCR falló: {e}", level="warn")
+                for d in detections:
+                    d["text_translated"] = ""
+
+        job_logs.log(job_uuid, "✅ OCR terminado")
+        return {
+            "detections": [
+                {
+                    **{k: v for k, v in d.items() if k != "thumbnail"},
+                    "thumbnail_b64": base64.b64encode(d["thumbnail"]).decode("ascii"),
+                }
+                for d in detections
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        job_logs.log(job_uuid, f"✖ OCR falló: {e}", level="error")
+        raise HTTPException(status_code=500, detail=f"Error en OCR: {str(e)[:200]}")
+    finally:
+        if tmp_path:
+            try:
+                _Path(tmp_path).unlink()
+            except OSError:
+                pass

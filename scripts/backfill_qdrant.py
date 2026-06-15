@@ -24,9 +24,9 @@ if str(_ROOT) not in sys.path:
 
 from sqlalchemy import select  # noqa: E402
 
-from app.core.database import SessionLocal           # noqa: E402
-from app.models.schemas import Job, Translation     # noqa: E402
-from app.services import rag_service                 # noqa: E402
+from app.core.database import SessionLocal  # noqa: E402
+from app.models.schemas import Job  # noqa: E402
+from app.services import rag_service  # noqa: E402
 
 
 async def main_async(args: argparse.Namespace) -> int:

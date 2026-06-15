@@ -22,11 +22,9 @@ necesita cambios.
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from typing import Any, Optional
 
-from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -37,14 +35,10 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from app.core.config import QDRANT_API_KEY, QDRANT_URL
 from app.services.embeddings_service import embed_batch, embed_one
 
-load_dotenv()
-
-
 # ── Configuración ───────────────────────────────────────────────────────────
-QDRANT_URL     = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None  # None si self-hosted sin auth
 COLLECTION     = "translations"
 VECTOR_SIZE    = 1536  # dimensiones de text-embedding-3-small
 

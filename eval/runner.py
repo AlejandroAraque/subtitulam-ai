@@ -13,12 +13,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from app.core.config   import DATA_DIR
+from app.core.config import DATA_DIR
 from app.core.database import SessionLocal
-from app.services      import glossary_service, translation_service
-from eval.config       import RunConfig, RunResult, now_iso
-from eval.metrics      import bleu, chrf, cpl, glossary
-
+from app.services import glossary_service, translation_service
+from eval.config import RunConfig, RunResult, now_iso
+from eval.metrics import bleu, chrf, cpl, glossary
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 DEFAULT_TESTSET_PATH = DATA_DIR / "testset" / "reference_en_es.jsonl"
@@ -105,7 +104,7 @@ def run(
 
     # translate_texts espera un dict {idx: texto} y devuelve un dict
     # {translations, tokens_prompt, tokens_completion, elapsed_s}.
-    # job_id=None y sliding_window=0: no contamina ChromaDB y los cues
+    # job_id=None y sliding_window=0: no contamina Qdrant y los cues
     # del test-set son samples sueltos (no narrativa secuencial).
     texts_dict = {i + 1: src for i, src in enumerate(sources)}
     trans_out  = asyncio.run(translation_service.translate_texts(

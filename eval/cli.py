@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from eval.config import RunConfig, RunResult
-from eval.runner import run, run_from_predictions, load_run, save, DEFAULT_TESTSET_PATH
+from eval.runner import DEFAULT_TESTSET_PATH, load_run, run, run_from_predictions, save
 
 # Forzar UTF-8 en stdout/stderr — necesario en PowerShell (cp1252 por
 # defecto) para imprimir los caracteres Unicode del marco (─ │ ╭ ╰).
@@ -120,7 +120,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--rag", action="store_true",
-        help="Activar RAG: queries a ChromaDB en cada batch para inyectar "
+        help="Activar RAG: queries a Qdrant en cada batch para inyectar "
              "ejemplos de traducciones previas. Modo read-only — no indexa "
              "(evita contaminar el corpus con las cues del test-set).",
     )
@@ -129,7 +129,7 @@ def main() -> None:
 
     testset_path = Path(args.testset)
     filter_ds    = args.filter_dataset
-    from eval.runner import _load_testset, _get_git_commit
+    from eval.runner import _get_git_commit, _load_testset
 
     # ── MODO RE-EVAL ────────────────────────────────────────────────────
     if args.from_run:

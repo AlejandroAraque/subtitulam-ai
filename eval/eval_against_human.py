@@ -23,12 +23,11 @@ Uso:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import sacrebleu
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Parsing
@@ -359,7 +358,7 @@ def main() -> None:
     quality = translation_quality(en, hum_map, ia_map)
     rows  = comparison_table(en, hum_map, ia_map)
 
-    print(f"\n=== COVERAGE ===")
+    print("\n=== COVERAGE ===")
     print(f"cues EN={cov.n_en} | HUM={cov.n_hum} | IA={cov.n_ia}")
     print(f"alineados HUM->EN: {cov.hum_aligned_to_en}/{cov.n_en} "
           f"({100*cov.hum_aligned_to_en/cov.n_en:.1f}%)")
@@ -367,19 +366,19 @@ def main() -> None:
           f"({100*cov.ia_aligned_to_en/cov.n_en:.1f}%)")
     print(f"omisiones humano: {cov.hum_omissions}")
 
-    print(f"\n=== LENGTHS ===")
+    print("\n=== LENGTHS ===")
     print(f"avg chars/cue | EN={lens.avg_chars_en:.1f} | "
           f"HUM={lens.avg_chars_hum:.1f} | IA={lens.avg_chars_ia:.1f}")
     print(f"línea más larga | HUM={lens.cpl_max_hum} | IA={lens.cpl_max_ia}")
     print(f"CPL<=38 compliance | HUM={lens.cpl_compliance_hum_38:.1f}% | "
           f"IA={lens.cpl_compliance_ia_38:.1f}%")
 
-    print(f"\n=== TRANSLATION QUALITY (humano como referencia) ===")
+    print("\n=== TRANSLATION QUALITY (humano como referencia) ===")
     print(f"pares evaluados: {quality.n_pairs}")
     print(f"BLEU: {quality.bleu:.2f}")
     print(f"chrF: {quality.chrf:.2f}")
 
-    print(f"\n=== TOP DIVERGENCIAS (ratio edit-distance HUM vs IA) ===")
+    print("\n=== TOP DIVERGENCIAS (ratio edit-distance HUM vs IA) ===")
     div_rows = [
         (r["idx"], r["start"], r["en"], r["hum"], r["ia"],
          normalized_diff(r["hum"], r["ia"]))
@@ -392,7 +391,7 @@ def main() -> None:
         print(f"  HUM: {hum_t}")
         print(f"  IA : {ia_t}")
 
-    print(f"\n=== OMISIONES HUMANAS (cues que el traductor decidió no traducir) ===")
+    print("\n=== OMISIONES HUMANAS (cues que el traductor decidió no traducir) ===")
     for idx in cov.hum_omissions:
         r = next(r for r in rows if r["idx"] == idx)
         print(f"  [{idx:>3} @ {r['start']:6.2f}s] EN: {r['en']!r}  IA: {r['ia']!r}")

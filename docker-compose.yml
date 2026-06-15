@@ -19,9 +19,12 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: subtitulam-qdrant
+    # Bind solo a loopback: el backend llega vía red interna de compose;
+    # publicar en 0.0.0.0 dejaba la API de escritura (sin auth) y el
+    # dashboard accesibles desde toda la LAN.
     ports:
-      - "6333:6333"   # HTTP REST + dashboard web (http://localhost:6333/dashboard)
-      - "6334:6334"   # gRPC (más rápido para batches grandes)
+      - "127.0.0.1:6333:6333"   # HTTP REST + dashboard (http://localhost:6333/dashboard)
+      - "127.0.0.1:6334:6334"   # gRPC (más rápido para batches grandes)
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
@@ -32,13 +35,18 @@ services:
       dockerfile: docker/Dockerfile.backend
     container_name: subtitulam-backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # :? hace fallar `docker compose up` si la var no está definida,
+      # en vez de arrancar con clave vacía y fallar en el primer job.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Define OPENAI_API_KEY en .env}
       QDRANT_URL:     http://qdrant:6333
       DATABASE_URL:   sqlite:////app/data/subtitulam.db
     volumes:
       - app_data:/app/data
+      # Modelos EasyOCR (~150 MB): sin volumen se re-descargan en cada
+      # recreación del contenedor.
+      - easyocr_models:/root/.EasyOCR
     depends_on:
       - qdrant
     restart: unless-stopped
@@ -59,3 +67,4 @@ services:
 volumes:
   qdrant_storage:
   app_data:
+  easyocr_models:

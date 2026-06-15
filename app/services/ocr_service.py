@@ -23,7 +23,6 @@ por defecto. Detecta GPU CUDA automáticamente y la usa si está disponible
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from pathlib import Path
@@ -33,7 +32,6 @@ import cv2
 import easyocr
 import numpy as np
 from openai import AsyncOpenAI
-
 
 logger = logging.getLogger("subtitulam.ocr")
 if not logger.handlers:

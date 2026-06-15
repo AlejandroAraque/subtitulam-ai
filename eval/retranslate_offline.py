@@ -25,7 +25,10 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 load_dotenv()  # OPENAI_API_KEY desde .env local
 
-from app.services import srt_service, translation_service
+from app.services import (  # noqa: E402  (después de sys.path.insert)
+    srt_service,
+    translation_service,
+)
 
 
 def _parse_args() -> tuple[Path, Path]:

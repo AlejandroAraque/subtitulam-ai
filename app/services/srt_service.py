@@ -1,5 +1,7 @@
-import srt
 from typing import List
+
+import srt
+
 
 def parse_srt(file_content: str) -> List[srt.Subtitle]:
     """
