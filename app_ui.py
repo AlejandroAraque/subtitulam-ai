@@ -29,6 +29,31 @@ load_dotenv()
 # "backend" en lugar de localhost. Default localhost para dev local sin Docker.
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+# ── Normas de subtitulado ────────────────────────────────────────────────────
+# UNE 153010 (TV España): 38 caracteres por línea. Netflix: 42. El default de
+# la app es la norma UNE porque es la que usan los estudios españoles; cada
+# encargo puede cambiarla desde el slider del Workspace.
+CPL_UNE = 38
+CPL_NETFLIX = 42
+DEFAULT_CPL = CPL_UNE
+CPS_LIMIT = 17.0
+
+# ── Tarifas OpenAI para la columna de coste (USD por millón de tokens) ──────
+# gpt-4o a fecha 2026-07: input $2.50/M · output $10/M. Conversión fija
+# aproximada a EUR; ajustar si el tipo de cambio se mueve mucho.
+GPT4O_USD_PER_M_INPUT = 2.50
+GPT4O_USD_PER_M_OUTPUT = 10.00
+EUR_PER_USD = 0.92
+
+
+def _job_cost_eur(tokens_prompt: int | None, tokens_completion: int | None) -> float | None:
+    """Coste en EUR de un job a partir de sus tokens persistidos."""
+    if not tokens_prompt and not tokens_completion:
+        return None
+    usd = ((tokens_prompt or 0) * GPT4O_USD_PER_M_INPUT
+           + (tokens_completion or 0) * GPT4O_USD_PER_M_OUTPUT) / 1_000_000
+    return usd * EUR_PER_USD
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # API HELPERS — capa fina sobre requests para hablar con el backend.
@@ -98,6 +123,20 @@ def api_delete_job(job_id: int) -> bool:
         return r.status_code == 204
     except requests.exceptions.RequestException:
         return False
+
+
+@st.cache_data(show_spinner=False)
+def _fetch_job_srt(job_id: int) -> bytes | None:
+    """SRT archivado de un job completado, o None si no está disponible
+    (jobs anteriores al archivado de resultados, o backend caído).
+    Cacheado: el archivo de un job completado es inmutable."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/jobs/{job_id}/download", timeout=10)
+        if r.status_code == 200:
+            return r.content
+        return None
+    except requests.exceptions.RequestException:
+        return None
 
 
 def _parse_srt_bytes(srt_bytes: bytes) -> list[dict]:
@@ -177,8 +216,8 @@ def _format_srt_timestamp(seconds: float) -> str:
 def _compute_cue_metrics(
     cue: dict,
     next_cue: dict | None = None,
-    cpl_limit: int = 42,
-    cps_limit: float = 17.0,
+    cpl_limit: int = DEFAULT_CPL,
+    cps_limit: float = CPS_LIMIT,
     min_duration_s: float = 0.500,
     max_duration_s: float = 7.0,
     min_gap_s: float = 0.080,
@@ -416,7 +455,7 @@ _DEFAULTS: dict = {
     "ws_error":        None,
     "ws_metrics":      None,
     "context_global":  "",
-    "cpl_limit":       42,
+    "cpl_limit":       DEFAULT_CPL,
     "target_lang":     "es",
     "glossary":        [],
     "history":         [],
@@ -1162,7 +1201,7 @@ with st.sidebar:
 
     st.markdown("""
     <div class="sb-foot">
-      <div class="dim">GPT-4o · v1.5</div>
+      <div class="dim">GPT-4o · v3.5</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1177,6 +1216,15 @@ def _render_translation_queue() -> bool:
     snap = get_queue_snapshot()
     has_activity = bool(snap["current"] or snap["pending"])
     has_any = has_activity or bool(snap["completed"])
+
+    # Al detectar un job recién completado, invalidar la caché del Historial:
+    # sin esto, la pestaña Historial mostraba la lista pre-traducción hasta el
+    # siguiente encolado (el worker corre en un thread y no puede tocar la
+    # caché de Streamlit con seguridad; se hace aquí, en el hilo de render).
+    n_done = len(snap["completed"])
+    if st.session_state.get("_q_done_seen", 0) != n_done:
+        st.session_state._q_done_seen = n_done
+        api_get_jobs.clear()
 
     if not has_any:
         return False
@@ -1369,17 +1417,16 @@ def _render_translation_queue() -> bool:
                             key=f"qdl_{c['id']}",
                         )
                 with colPV:
-                    if st.button("Preview", use_container_width=True,
-                                 key=f"qpv_{c['id']}",
-                                 help="Abrir este SRT en la pestaña Preview"):
-                        # Pasar el .srt resultante al Preview vía session_state
-                        # (Streamlit no admite pre-cargar un file_uploader, así
-                        # que avisamos con un toast — el usuario lo descarga y
-                        # lo sube en Preview manualmente).
-                        st.toast(
-                            "Descarga el .srt y súbelo en la pestaña Preview.",
-                            icon="ℹ️",
-                        )
+                    # Sin botón "Preview" falso: Streamlit no permite
+                    # pre-cargar un file_uploader, así que un botón que solo
+                    # muestra un toast es un dead-end que confunde. El flujo
+                    # honesto es descargar y subir en la pestaña Preview.
+                    st.markdown(
+                        '<div style="font-size:11px;color:var(--text-4);'
+                        'margin-top:10px;text-align:center;">Revísalo en '
+                        'Preview</div>',
+                        unsafe_allow_html=True,
+                    )
             elif c["status"] == "cancelled":
                 st.markdown(
                     f'<div style="font-size:12.5px;color:var(--text-4);'
@@ -1413,11 +1460,9 @@ def _render_translation_queue() -> bool:
 
 
 def render_workspace():
-    trn_id = f"TRN-{(842 + len(st.session_state.history)):05d}"
     page_header(
         "Nueva Traducción",
         "Sube tus .srt y tradúcelos con IA. Puedes encolar varios — se procesan uno a uno.",
-        right=f'<span class="st-pill queued mono"><span class="dot"></span>{trn_id}</span>',
     )
 
     # ── COLA DE TRADUCCIÓN (arriba de todo) ──────────────────────────
@@ -1463,6 +1508,11 @@ def render_workspace():
         st.session_state.target_lang = [k for k, v in lang_opts.items() if v == choice][0]
     with col_cpl:
         st.session_state.cpl_limit = st.slider("Límite CPL (caracteres por línea)", 30, 50, st.session_state.cpl_limit)
+        st.markdown(
+            f'<div class="hint">Normas habituales: <b>{CPL_UNE} = UNE 153010</b> '
+            f'(TV España) · {CPL_NETFLIX} = Netflix.</div>',
+            unsafe_allow_html=True,
+        )
 
     # CTA — ahora encola en lugar de procesar síncrono
     st.markdown('<div style="margin-top:18px;"></div>', unsafe_allow_html=True)
@@ -1782,6 +1832,30 @@ def render_glosario():
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · HISTORIAL
 # ═══════════════════════════════════════════════════════════════════════════
+@st.dialog("Borrar todo el historial")
+def _dialog_confirm_clear_history(jobs: list[dict]):
+    """Confirmación antes de la acción más destructiva de la app: borra
+    TODOS los proyectos persistidos (era un clic sin vuelta atrás)."""
+    st.markdown(
+        f"Vas a borrar **{len(jobs)} proyecto(s)** de forma permanente, "
+        "incluidas sus traducciones guardadas. Esta acción no se puede "
+        "deshacer."
+    )
+    col_no, col_si = st.columns(2)
+    with col_no:
+        if st.button("Cancelar", use_container_width=True):
+            st.rerun()
+    with col_si:
+        if st.button("Sí, borrar todo", type="primary", use_container_width=True):
+            for j in jobs:
+                api_delete_job(j["id"])
+            api_get_jobs.clear()
+            st.session_state.ws_state = "idle"
+            st.session_state.ws_result_bytes = None
+            st.toast("Historial vaciado.", icon="🗑")
+            st.rerun()
+
+
 def render_historial():
     # ── Lectura desde la API en cada render (fuente de verdad: SQLite) ──
     jobs = api_get_jobs()
@@ -1820,6 +1894,8 @@ def render_historial():
             "failed":    "✕ Error",
         }.get(j.get("status"), j.get("status", "—"))
 
+        coste = _job_cost_eur(j.get("tokens_prompt"), j.get("tokens_completion"))
+
         rows.append({
             "ID":       f"JOB-{j['id']:05d}",
             "Archivo":  j.get("filename", "—"),
@@ -1827,6 +1903,7 @@ def render_historial():
             "CPL":      j.get("cpl", 0),
             "Líneas":   j.get("n_translations", 0),
             "% CPL":    j.get("cpl_compliance", 0.0),
+            "Coste":    coste,
             "Duración": duracion,
             "Fecha":    fecha,
             "Estado":   status_label,
@@ -1844,17 +1921,58 @@ def render_historial():
             "CPL":      st.column_config.NumberColumn("CPL",   format="%d"),
             "Líneas":   st.column_config.NumberColumn("Líneas", format="%d"),
             "% CPL":    st.column_config.NumberColumn("% CPL", format="%.1f%%"),
+            "Coste":    st.column_config.NumberColumn(
+                "Coste", format="%.3f €",
+                help="Coste de la API de OpenAI para esta traducción "
+                     "(tokens reales × tarifa gpt-4o).",
+            ),
         },
     )
+
+    # Total acumulado: el "recibo" del historial completo.
+    total_eur = sum(c for c in (r["Coste"] for r in rows) if c is not None)
+    st.markdown(
+        f'<div style="font-size:12.5px;color:var(--text-3);margin-top:6px;'
+        f'text-align:right;">Coste API total del historial: '
+        f'<b>{total_eur:.2f} €</b></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Re-descarga del SRT de un proyecto ──────────────────────────────
+    completed = [j for j in jobs if j.get("status") == "completed"]
+    if completed:
+        st.markdown('<div style="height:12px;"></div>', unsafe_allow_html=True)
+        section_label("Descargar resultado")
+        sel_col, dl_col = st.columns([3, 1.2], gap="small")
+        with sel_col:
+            opciones = {f"JOB-{j['id']:05d} · {j.get('filename', '—')}": j["id"]
+                        for j in completed}
+            elegido = st.selectbox(
+                "proyecto", list(opciones), label_visibility="collapsed",
+                key="hist_dl_select",
+            )
+        with dl_col:
+            job_id = opciones[elegido]
+            srt_bytes = _fetch_job_srt(job_id)
+            if srt_bytes is not None:
+                st.download_button(
+                    "⬇ Descargar .srt",
+                    data=srt_bytes,
+                    file_name=f"traducido_job_{job_id}.srt",
+                    mime="text/plain",
+                    use_container_width=True,
+                    key=f"hist_dl_{job_id}",
+                )
+            else:
+                st.button(
+                    "No disponible", disabled=True, use_container_width=True,
+                    help="Proyecto anterior al archivado de resultados: el "
+                         "SRT solo se conservó en la descarga original.",
+                )
+
     st.markdown('<div style="height:12px;"></div>', unsafe_allow_html=True)
     if st.button("Limpiar historial", type="secondary", use_container_width=True):
-        for j in jobs:
-            api_delete_job(j["id"])
-        api_get_jobs.clear()   # invalidar cache para refrescar a vacío
-        st.session_state.ws_state = "idle"
-        st.session_state.ws_result_bytes = None
-        st.toast("Historial vaciado.", icon="🗑")
-        st.rerun()
+        _dialog_confirm_clear_history(jobs)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · PREVIEW (QA visual del .srt traducido sobre el vídeo)
@@ -2232,8 +2350,8 @@ def render_preview():
     n_live = len(live_effective)
     if n_live > 0:
         n_problems = sum(1 for m in metrics_by_key.values() if m["status"] != "ok")
-        n_cpl_ok   = sum(1 for m in metrics_by_key.values() if m["cpl_max"] <= 42)
-        n_cps_ok   = sum(1 for m in metrics_by_key.values() if m["cps"] <= 17)
+        n_cpl_ok   = sum(1 for m in metrics_by_key.values() if m["cpl_max"] <= DEFAULT_CPL)
+        n_cps_ok   = sum(1 for m in metrics_by_key.values() if m["cps"] <= CPS_LIMIT)
         pct_cpl = round(n_cpl_ok * 100 / n_live, 1)
         pct_cps = round(n_cps_ok * 100 / n_live, 1)
 
@@ -2241,8 +2359,8 @@ def render_preview():
         st.markdown(f"""
         <div class="gl-stats">
           <div class="gl-stat"><div class="v">{n_live}</div><div class="l">Cues activos</div></div>
-          <div class="gl-stat"><div class="v">{pct_cpl}%</div><div class="l">CPL ≤ 42</div></div>
-          <div class="gl-stat"><div class="v">{pct_cps}%</div><div class="l">CPS ≤ 17</div></div>
+          <div class="gl-stat"><div class="v">{pct_cpl}%</div><div class="l">CPL ≤ {DEFAULT_CPL} (UNE 153010)</div></div>
+          <div class="gl-stat"><div class="v">{pct_cps}%</div><div class="l">CPS ≤ {CPS_LIMIT:.0f}</div></div>
           <div class="gl-stat"><div class="v">{n_problems}</div><div class="l">Con problemas</div></div>
         </div>
         """, unsafe_allow_html=True)
@@ -2333,7 +2451,7 @@ def render_preview():
         if filter_choice == "Todos los cues":          return True
         if filter_choice == "Con problemas":           return m["status"] != "ok"
         if filter_choice == "Con problemas críticos":  return m["status"] == "err"
-        if filter_choice == "Solo CPL excedido":       return m["cpl_max"] > 42
+        if filter_choice == "Solo CPL excedido":       return m["cpl_max"] > DEFAULT_CPL
         if filter_choice == "Solo CPS excedido":       return m["cps"] > 17
         if filter_choice == "Solo duración fuera de rango":
             return m["duration"] < 0.833 or m["duration"] > 7.0

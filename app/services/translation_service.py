@@ -433,9 +433,23 @@ def build_user_prompt(
         for ex in rag_examples:
             src = ex.get("source_text", "").replace("\n", " ").strip()
             tgt = ex.get("target_text", "").replace("\n", " ").strip()
-            if src and tgt:
-                parts.append(f'  EN: "{src}"')
-                parts.append(f'  ES: "{tgt}"')
+            if not (src and tgt):
+                continue
+            # Contexto del ejemplo (si el corpus lo tiene): obra + escena
+            # inmediata. Desambigua ejemplos que sueltos no significan nada
+            # ("You're getting them!"). Truncado corto: es orientación, no
+            # contenido a traducir.
+            obra = ex.get("context", "").replace("\n", " ").strip()[:100]
+            prev = ex.get("prev_text", "").replace("\n", " ").strip()[:60]
+            marco: list[str] = []
+            if obra:
+                marco.append(f"obra: {obra}")
+            if prev:
+                marco.append(f'antes: "{prev}"')
+            if marco:
+                parts.append(f'  [{" · ".join(marco)}]')
+            parts.append(f'  EN: "{src}"')
+            parts.append(f'  ES: "{tgt}"')
         parts.append("")
 
     if recent_window:
@@ -696,6 +710,11 @@ async def translate_texts(
                         "source_text": texts_dict[idx],
                         "target_text": translated_dict[idx],
                         "target_lang": target_lang,
+                        # Vecinas + contexto de la obra: desambiguan el
+                        # ejemplo cuando se recupere en jobs futuros.
+                        "prev_text":   texts_dict.get(idx - 1, ""),
+                        "next_text":   texts_dict.get(idx + 1, ""),
+                        "context":     context.strip(),
                     }
                     for idx, _ in bloque
                     if idx in translated_dict

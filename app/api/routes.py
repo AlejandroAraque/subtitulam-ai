@@ -144,6 +144,22 @@ async def translate_subtitle(
             f"tokens prompt={result['tokens_prompt']} completion={result['tokens_completion']}",
         )
 
+        # ── 6. Persistir el SRT final a disco para re-descargas ───────────
+        # Sin esto, el resultado solo existía en la respuesta HTTP: si el
+        # usuario cerraba el navegador sin descargar, el trabajo (pagado)
+        # quedaba inaccesible. La tabla Translation no guarda timecodes,
+        # así que el archivo es la única forma barata de reconstruirlo.
+        try:
+            from app.core.config import DATA_DIR
+            outputs_dir = DATA_DIR / "outputs"
+            outputs_dir.mkdir(exist_ok=True)
+            (outputs_dir / f"job_{job.id}.srt").write_text(
+                final_srt_content, encoding="utf-8",
+            )
+        except OSError as e:
+            # No bloqueante: la respuesta HTTP sigue llevando el SRT.
+            job_logs.log(job_uuid, f"⚠ No se pudo archivar el SRT: {e}", level="warn")
+
         return Response(
             content=final_srt_content,
             media_type="text/plain",
@@ -302,7 +318,42 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
 def delete_job(job_id: int, db: Session = Depends(get_db)):
     if not history_service.delete_job(db, job_id):
         raise HTTPException(status_code=404, detail="Job no encontrado.")
+    # Borrar también el SRT archivado (si existe)
+    from app.core.config import DATA_DIR
+    try:
+        (DATA_DIR / "outputs" / f"job_{job_id}.srt").unlink(missing_ok=True)
+    except OSError:
+        pass
     return Response(status_code=204)
+
+
+@router.get("/jobs/{job_id}/download")
+def download_job_srt(job_id: int, db: Session = Depends(get_db)):
+    """Devuelve el SRT final archivado de un job completado.
+
+    Solo disponible para jobs posteriores a v3.5.1 (cuando se empezó a
+    archivar el output); para jobs antiguos devuelve 404 con mensaje claro.
+    """
+    from app.core.config import DATA_DIR
+
+    job = history_service.get_job(db, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+
+    srt_path = DATA_DIR / "outputs" / f"job_{job_id}.srt"
+    if not srt_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Este proyecto es anterior al archivado de resultados "
+                   "y su SRT ya no está disponible para descarga.",
+        )
+    return Response(
+        content=srt_path.read_text(encoding="utf-8"),
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="traducido_job_{job_id}.srt"',
+        },
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -59,16 +59,23 @@ async def main_async(args: argparse.Namespace) -> int:
         # indexarlas contaminaría el corpus RAG con pares basura que luego
         # reaparecen como "EJEMPLOS PREVIOS" en jobs futuros. Es el mismo
         # filtro que aplica la indexación per-batch en translate_texts.
+        # Se reconstruyen las cues vecinas (prev/next) y se adjunta el
+        # contexto del job — el mismo payload enriquecido que genera la
+        # indexación per-batch desde v3.5.1.
         t0 = time.time()
         n_total = 0
         n_skipped = 0
         for j in jobs:
+            by_idx = {t.cue_idx: t.source_text for t in j.translations}
             payload = [
                 {
                     "cue_idx":     t.cue_idx,
                     "source_text": t.source_text,
                     "target_text": t.target_text,
                     "target_lang": j.target_lang,
+                    "prev_text":   by_idx.get(t.cue_idx - 1, ""),
+                    "next_text":   by_idx.get(t.cue_idx + 1, ""),
+                    "context":     (j.context or "").strip(),
                 }
                 for t in j.translations
                 if t.target_text and not t.target_text.startswith("[ERROR]")

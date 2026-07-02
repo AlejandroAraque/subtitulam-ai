@@ -156,6 +156,14 @@ async def add_translations(
                 "target_text": t["target_text"],
                 "target_lang": t.get("target_lang", "es"),
                 "filename":    filename or t.get("filename", ""),
+                # Contexto narrativo (v3.5.1): las cues vecinas y el contexto
+                # de la obra desambiguan el ejemplo al reinyectarlo ("You're
+                # getting them!" no significa nada suelto; con la cue anterior
+                # sí). El embedding sigue siendo SOLO del source_text (match
+                # preciso por cue); el contexto viaja como payload.
+                "prev_text":   t.get("prev_text", ""),
+                "next_text":   t.get("next_text", ""),
+                "context":     t.get("context", ""),
             },
         )
         for t, vec in zip(translations, vectors)
@@ -225,6 +233,10 @@ async def query_similar(
             "similarity":  round(hit.score, 4),
             "job_id":      hit.payload.get("job_id"),
             "cue_idx":     hit.payload.get("cue_idx"),
+            "filename":    hit.payload.get("filename", ""),
+            "prev_text":   hit.payload.get("prev_text", ""),
+            "next_text":   hit.payload.get("next_text", ""),
+            "context":     hit.payload.get("context", ""),
         }
         for hit in response.points
     ]
