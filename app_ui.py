@@ -38,12 +38,17 @@ CPL_NETFLIX = 42
 DEFAULT_CPL = CPL_UNE
 CPS_LIMIT = 17.0
 
-# ── Tarifas OpenAI para la columna de coste (USD por millón de tokens) ──────
-# gpt-4o a fecha 2026-07: input $2.50/M · output $10/M. Conversión fija
-# aproximada a EUR; ajustar si el tipo de cambio se mueve mucho.
-GPT4O_USD_PER_M_INPUT = 2.50
-GPT4O_USD_PER_M_OUTPUT = 10.00
-EUR_PER_USD = 0.92
+# ── Tarifas OpenAI para la columna de coste ─────────────────────────────────
+# El coste NO es una estimación inventada: OpenAI reporta los tokens exactos
+# de cada request (usage.prompt_tokens / completion_tokens), la app los suma
+# y persiste por trabajo, y la factura de OpenAI es exactamente
+# tokens × tarifa. Estas constantes son la tarifa oficial de gpt-4o
+# (openai.com/api/pricing, vigente 2026-07: $2.50/M entrada · $10/M salida).
+# Si OpenAI cambia precios, actualizar aquí o vía variables de entorno.
+# Verificable: la suma de la columna debe cuadrar con platform.openai.com/usage.
+GPT4O_USD_PER_M_INPUT = float(os.getenv("GPT4O_USD_PER_M_INPUT", "2.50"))
+GPT4O_USD_PER_M_OUTPUT = float(os.getenv("GPT4O_USD_PER_M_OUTPUT", "10.00"))
+EUR_PER_USD = float(os.getenv("EUR_PER_USD", "0.92"))  # cambio aprox., ajustable
 
 
 def _job_cost_eur(tokens_prompt: int | None, tokens_completion: int | None) -> float | None:
@@ -1896,12 +1901,13 @@ def render_historial():
 
         coste = _job_cost_eur(j.get("tokens_prompt"), j.get("tokens_completion"))
 
-        # Columnas compactas a propósito: la tabla debe caber SIN scroll
-        # horizontal. "Idiomas" (siempre EN→ES) y "CPL" (config, casi
-        # constante) no aportan lo suficiente para ocupar sitio.
+        # Sin scroll horizontal: columnas compactas y anchos explícitos.
+        # "CPL" (config casi constante) queda fuera; "Idiomas" se mantiene
+        # porque la app soporta varios destinos (es, es-419, fr, de, pt, it).
         rows.append({
             "ID":       f"JOB-{j['id']:05d}",
             "Archivo":  j.get("filename", "—"),
+            "Idiomas":  f"EN → {j.get('target_lang', 'es').upper()}",
             "Líneas":   j.get("n_translations", 0),
             "% CPL":    j.get("cpl_compliance", 0.0),
             "Coste":    coste,
@@ -1917,18 +1923,20 @@ def render_historial():
         use_container_width=True,
         height=min(58 + n * 38, 600),
         column_config={
-            "ID":       st.column_config.TextColumn("ID",     width="small"),
+            "ID":       st.column_config.TextColumn("ID",      width="small"),
             "Archivo":  st.column_config.TextColumn("Archivo", width="medium"),
+            "Idiomas":  st.column_config.TextColumn("Idiomas", width="small"),
             "Líneas":   st.column_config.NumberColumn("Líneas", format="%d", width="small"),
             "% CPL":    st.column_config.NumberColumn("% CPL", format="%.1f%%", width="small"),
             "Coste":    st.column_config.NumberColumn(
                 "Coste", format="%.3f €", width="small",
-                help="Coste de la API de OpenAI para esta traducción "
-                     "(tokens reales × tarifa gpt-4o).",
+                help="Tokens reales que reportó OpenAI para este trabajo × "
+                     "tarifa oficial de gpt-4o. Verificable contra "
+                     "platform.openai.com/usage.",
             ),
             "Duración": st.column_config.TextColumn("Duración", width="small"),
-            "Fecha":    st.column_config.TextColumn("Fecha", width="medium"),
-            "Estado":   st.column_config.TextColumn("Estado", width="small"),
+            "Fecha":    st.column_config.TextColumn("Fecha",    width="medium"),
+            "Estado":   st.column_config.TextColumn("Estado",   width="small"),
         },
     )
 
