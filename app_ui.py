@@ -624,12 +624,13 @@ div[data-baseweb="select"]>div{
 .bnr.ok{background:var(--ok-bg);border-color:var(--ok-br);}
 .bnr.err{background:var(--err-bg);border-color:var(--err-br);}
 .bnr.warn{background:var(--warn-bg);border-color:var(--warn-br);}
+.bnr.info{background:var(--info-bg);border-color:var(--info-br);}
 .bnr .ico{width:22px;height:22px;border-radius:99px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;font-size:12px;font-weight:700;margin-top:1px;}
-.bnr.ok .ico{background:var(--ok-fg);} .bnr.err .ico{background:var(--err-fg);} .bnr.warn .ico{background:var(--warn-fg);}
+.bnr.ok .ico{background:var(--ok-fg);} .bnr.err .ico{background:var(--err-fg);} .bnr.warn .ico{background:var(--warn-fg);} .bnr.info .ico{background:var(--info-fg);}
 .bnr .t{font-size:13px;font-weight:600;}
-.bnr.ok .t{color:var(--ok-fg);} .bnr.err .t{color:var(--err-fg);} .bnr.warn .t{color:var(--warn-fg);}
+.bnr.ok .t{color:var(--ok-fg);} .bnr.err .t{color:var(--err-fg);} .bnr.warn .t{color:var(--warn-fg);} .bnr.info .t{color:var(--info-fg);}
 .bnr .s{font-size:12.5px;margin-top:2px;}
-.bnr.ok .s{color:var(--ok-fg-2);} .bnr.err .s{color:var(--err-fg-2);} .bnr.warn .s{color:var(--warn-fg-2);}
+.bnr.ok .s{color:var(--ok-fg-2);} .bnr.err .s{color:var(--err-fg-2);} .bnr.warn .s{color:var(--warn-fg-2);} .bnr.info .s{color:var(--info-fg-2);}
 .bnr .s .mono{font-family:var(--font-mono);font-size:12px;}
 
 /* ── METRICS ───────────────────────────── */
@@ -1250,15 +1251,15 @@ def _render_translation_queue() -> bool:
                     }.get(entry.get("level", "info"), "var(--text-2)")
                     msg = escape(entry["message"])
                     rows.append(
-                        f'<div style="font-family:var(--mono);font-size:11.5px;'
+                        f'<div style="font-family:var(--font-mono);font-size:11.5px;'
                         f'line-height:1.5;color:{color};">'
                         f'<span style="color:var(--text-4);">{ts}</span>  '
                         f'{msg}</div>'
                     )
                 st.markdown(
                     '<div style="max-height:240px;overflow-y:auto;'
-                    'background:var(--bg-2);padding:8px 10px;border-radius:6px;'
-                    'border:1px solid var(--border-1);">'
+                    'background:var(--bg);padding:8px 10px;border-radius:6px;'
+                    'border:1px solid var(--line);">'
                     + "".join(rows)
                     + '</div>',
                     unsafe_allow_html=True,
@@ -2080,6 +2081,18 @@ def render_preview():
         empty_state("📝", "Falta el .srt", "Sube el .srt traducido que quieres revisar.")
         return
 
+    # ── Invalidar el estado del editor al cambiar de .srt ──────────────
+    # Sin esto, las ediciones/borrados del archivo anterior se aplican por
+    # índice al nuevo → "Descargar .srt corregido" produce un archivo
+    # corrupto en silencio. Mismo patrón de firma que usa el bloque CV
+    # para el vídeo (prv_cv_video_sig).
+    srt_sig = (srt_file.name, srt_file.size)
+    if st.session_state.get("prv_srt_sig") != srt_sig:
+        st.session_state.prv_edits = {}
+        st.session_state.prv_deleted = set()
+        st.session_state.prv_added = []
+        st.session_state.prv_srt_sig = srt_sig
+
     # ── Reproductor con subtítulos quemados ────────────────────────────
     srt_bytes_original = srt_file.getvalue()
     cues = _parse_srt_bytes(srt_bytes_original)
@@ -2657,11 +2670,16 @@ def render_preview():
                 raw = None
 
         if raw is not None:
-            # Decodificar thumbnails base64 → bytes (mismo shape que antes)
+            # Decodificar thumbnails base64 → bytes (mismo shape que antes).
+            # Un thumbnail malformado no debe tirar la página entera: se
+            # sustituye por vacío y el render lo salta.
             detections = []
             for d in raw:
                 thumb = d.pop("thumbnail_b64", "")
-                d["thumbnail"] = _b64.b64decode(thumb) if thumb else b""
+                try:
+                    d["thumbnail"] = _b64.b64decode(thumb) if thumb else b""
+                except Exception:
+                    d["thumbnail"] = b""
                 detections.append(d)
 
             dt = _time.time() - t0
@@ -2735,7 +2753,13 @@ def render_preview():
                 row_cols = st.columns(cols_per_row, gap="medium")
                 for j, d in enumerate(page_items[i:i + cols_per_row]):
                     with row_cols[j]:
-                        st.image(d["thumbnail"])
+                        if d.get("thumbnail"):
+                            st.image(
+                                d["thumbnail"],
+                                caption=f"Texto detectado: {d.get('text', '')[:60]}",
+                            )
+                        else:
+                            st.caption("(miniatura no disponible)")
                         # Color del badge según confianza
                         conf = d.get("confidence", 0.0)
                         if conf >= 0.7:

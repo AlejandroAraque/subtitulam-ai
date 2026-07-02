@@ -8,6 +8,7 @@ para que el comportamiento sea idéntico en local (`uv run uvicorn`) y
 en Docker (donde compose inyecta las vars y load_dotenv es no-op).
 """
 import os
+import tomllib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -16,11 +17,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Versión (única fuente: pyproject.toml vía package metadata) ───────────
-try:
-    APP_VERSION = _pkg_version("ai-subtitle-translator")
-except PackageNotFoundError:
-    APP_VERSION = "dev"  # ejecutando sin instalar el paquete
+
+# ── Versión (única fuente: pyproject.toml) ────────────────────────────────
+def _read_version() -> str:
+    """Resuelve la versión del proyecto.
+
+    1. Package metadata (si el paquete está instalado).
+    2. Fallback: leer pyproject.toml directamente — necesario porque uv
+       trata el proyecto como virtual (sin [build-system]) y nunca lo
+       instala, y en Docker se usa --no-install-project: en ambos casos
+       importlib.metadata lanza PackageNotFoundError.
+    """
+    try:
+        return _pkg_version("ai-subtitle-translator")
+    except PackageNotFoundError:
+        pass
+    try:
+        pyproject = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
+        with open(pyproject, "rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except Exception:
+        return "dev"
+
+
+APP_VERSION = _read_version()
 
 # ── Rutas base ────────────────────────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent

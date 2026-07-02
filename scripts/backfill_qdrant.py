@@ -32,10 +32,11 @@ from app.services import rag_service  # noqa: E402
 async def main_async(args: argparse.Namespace) -> int:
     db = SessionLocal()
     try:
-        # Recorrer todos los jobs completados (los que tienen translations).
-        stmt = select(Job).order_by(Job.id)
+        # Solo jobs completados: los failed no tienen traducciones útiles y
+        # los running están a medias.
+        stmt = select(Job).where(Job.status == "completed").order_by(Job.id)
         jobs = list(db.scalars(stmt).all())
-        print(f"[1/3] Jobs encontrados en SQLite: {len(jobs)}")
+        print(f"[1/3] Jobs completados en SQLite: {len(jobs)}")
 
         if not jobs:
             print("      No hay nada que indexar.")
@@ -53,9 +54,14 @@ async def main_async(args: argparse.Namespace) -> int:
             print("[3/3] --dry-run: no se ha indexado nada.")
             return 0
 
-        # Indexar job a job — add_translations es idempotente
+        # Indexar job a job — add_translations es idempotente.
+        # Se filtran cues "[ERROR]" (chunks que fallaron, p. ej. por 429):
+        # indexarlas contaminaría el corpus RAG con pares basura que luego
+        # reaparecen como "EJEMPLOS PREVIOS" en jobs futuros. Es el mismo
+        # filtro que aplica la indexación per-batch en translate_texts.
         t0 = time.time()
         n_total = 0
+        n_skipped = 0
         for j in jobs:
             payload = [
                 {
@@ -65,7 +71,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     "target_lang": j.target_lang,
                 }
                 for t in j.translations
+                if t.target_text and not t.target_text.startswith("[ERROR]")
             ]
+            n_skipped += len(j.translations) - len(payload)
             if not payload:
                 continue
             n = await rag_service.add_translations(
@@ -77,6 +85,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
         dt = time.time() - t0
         print(f"[3/3] Indexado completo · {n_total} translations · {dt:.1f}s")
+        if n_skipped:
+            print(f"      {n_skipped} cues [ERROR] o vacías excluidas del corpus.")
 
         # Verificación final con Qdrant
         in_qdrant = rag_service.count()

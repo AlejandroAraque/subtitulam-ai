@@ -40,4 +40,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build de las imágenes (caza Dockerfiles rotos)
+        # Dummy: compose interpola ${OPENAI_API_KEY:?} en `build` aunque la
+        # variable solo se use en runtime; sin ella el build falla en CI.
+        env:
+          OPENAI_API_KEY: ci-dummy-not-a-real-key
         run: docker compose build
