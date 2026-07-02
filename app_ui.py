@@ -1405,10 +1405,10 @@ def _render_translation_queue() -> bool:
                     )
                     if n_failed:
                         st.markdown(
-                            f'<div style="font-size:11.5px;color:var(--warn-fg);'
-                            f'margin-top:2px;">Busca "[ERROR]" en el SRT '
-                            f'descargado: esas cues conservan el inglés original.'
-                            f'</div>',
+                            '<div style="font-size:11.5px;color:var(--warn-fg);'
+                            'margin-top:2px;">Busca "[ERROR]" en el SRT '
+                            'descargado: esas cues conservan el inglés original.'
+                            '</div>',
                             unsafe_allow_html=True,
                         )
                 with colDL:
