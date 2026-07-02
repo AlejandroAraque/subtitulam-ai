@@ -637,11 +637,55 @@ async def translate_texts(
                 logger.info("← %s · %.2fs", batch_label, dt)
                 job_logs.log(job_uuid, f"← Chunk {chunk_idx}/{n_chunks} ok · {dt:.1f}s")
 
+            # ── Validación de la respuesta (antes: fallos silenciosos) ────
+            # (a) Truncado por max_tokens: el batch llegó a medias.
+            finish = response.choices[0].finish_reason
+            if finish == "length":
+                logger.error(
+                    "✖ %s truncado por max_tokens=%d — cues del final del "
+                    "batch probablemente perdidas", batch_label, OPENAI_MAX_TOKENS,
+                )
+                job_logs.log(
+                    job_uuid,
+                    f"⚠ Chunk {chunk_idx}/{n_chunks} truncado por max_tokens "
+                    f"— posibles cues perdidas",
+                    level="warn",
+                )
+
             traduccion_bruta = response.choices[0].message.content.strip()
             traducciones_parseadas = parsear_traducciones(traduccion_bruta)
 
+            # (b) Índices fantasma: un idx alucinado fuera del batch podría
+            # sobrescribir traducciones ya hechas de cues anteriores.
+            batch_idxs = {idx for idx, _ in bloque}
+            fantasma = set(traducciones_parseadas) - batch_idxs
+            if fantasma:
+                logger.warning(
+                    "✖ %s · %d índice(s) fuera del batch descartados: %s",
+                    batch_label, len(fantasma), sorted(fantasma),
+                )
+
             for idx, texto_trad in traducciones_parseadas.items():
-                translated_dict[idx] = ajustar_cpl_optimo(texto_trad, max_cpl=cpl_limit)
+                if idx in batch_idxs:
+                    translated_dict[idx] = ajustar_cpl_optimo(texto_trad, max_cpl=cpl_limit)
+
+            # (c) Cues del batch que el LLM NO devolvió: marcarlas [ERROR]
+            # explícitamente. Antes quedaban ausentes del dict y el caller
+            # las rellenaba con el inglés original sin que nadie lo supiera.
+            missing = batch_idxs - set(traducciones_parseadas)
+            if missing:
+                logger.error(
+                    "✖ %s · %d cue(s) no devueltas por el LLM: %s",
+                    batch_label, len(missing), sorted(missing),
+                )
+                job_logs.log(
+                    job_uuid,
+                    f"⚠ Chunk {chunk_idx}/{n_chunks}: {len(missing)} cue(s) "
+                    f"sin traducción ({sorted(missing)})",
+                    level="warn",
+                )
+                for idx in missing:
+                    translated_dict[idx] = f"[ERROR] {texts_dict[idx]}"
 
             # ── 4. Indexar este batch en Qdrant (solo si full mode) ───────
             if use_rag and job_id is not None:
@@ -679,14 +723,24 @@ async def translate_texts(
                 translated_dict[idx] = f"[ERROR] {texto}"
 
     dt_total = time.time() - t_job_start
+    n_failed = sum(1 for t in translated_dict.values() if t.startswith("[ERROR]"))
     logger.info(
-        "── JOB COMPLETO ──  %.2fs · tokens total prompt=%d completion=%d",
+        "── JOB COMPLETO ──  %.2fs · tokens total prompt=%d completion=%d · "
+        "cues fallidas=%d/%d",
         dt_total, total_prompt_tokens, total_completion_tokens,
+        n_failed, len(items),
     )
+    if n_failed:
+        job_logs.log(
+            job_uuid,
+            f"⚠ Job con {n_failed}/{len(items)} cues fallidas ([ERROR])",
+            level="warn",
+        )
 
     return {
         "translations":      translated_dict,
         "tokens_prompt":     total_prompt_tokens,
         "tokens_completion": total_completion_tokens,
         "elapsed_s":         dt_total,
+        "n_failed":          n_failed,
     }

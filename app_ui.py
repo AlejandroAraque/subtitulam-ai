@@ -856,9 +856,17 @@ def _process_translation_raw(
     n_over_cpl = sum(1 for ln in lines if len(ln) > cpl_limit)
     cpl_rate = f"{(n_lines - n_over_cpl) / max(1, n_lines) * 100:.1f}%"
 
+    # Cues que el backend no pudo traducir (marcadas [ERROR] en el SRT).
+    # 0 en condiciones normales; >0 tras errores parciales (p. ej. 429).
+    try:
+        failed_cues = int(response.headers.get("X-Failed-Cues", "0"))
+    except ValueError:
+        failed_cues = 0
+
     return {
-        "bytes":    response.content,
-        "filename": f"{target_lang}_{srt_name}",
+        "bytes":       response.content,
+        "filename":    f"{target_lang}_{srt_name}",
+        "failed_cues": failed_cues,
         "metrics":  {
             "cpl_rate": cpl_rate,
             "lines":    str(n_lines),
@@ -962,6 +970,7 @@ def _translation_worker_loop() -> None:
                     job["result_bytes"] = result["bytes"]
                     job["result_name"]  = result["filename"]
                     job["metrics"]      = result["metrics"]
+                    job["failed_cues"]  = result.get("failed_cues", 0)
                 state["completed"].append(job)
                 state["current"] = None
         except Exception as e:
@@ -1321,10 +1330,19 @@ def _render_translation_queue() -> bool:
                 colL, colDL, colPV = st.columns([3.5, 1.2, 0.9], gap="small")
                 with colL:
                     m = c.get("metrics") or {}
+                    n_failed = c.get("failed_cues", 0)
+                    # Con cues fallidas el job sigue siendo descargable,
+                    # pero el estado deja de ser un ✅ limpio: hay [ERROR]
+                    # dentro del SRT que el revisor debe buscar y arreglar.
+                    if n_failed:
+                        estado = (f'<b style="color:var(--warn-fg);">⚠ Listo '
+                                  f'con {n_failed} error(es)</b>')
+                    else:
+                        estado = '<b style="color:var(--ok-fg);">✅ Listo</b>'
                     st.markdown(
                         f'<div style="font-size:12.5px;color:var(--text-2);'
                         f'margin-top:6px;">'
-                        f'<b style="color:var(--ok-fg);">✅ Listo</b>  '
+                        f'{estado}  '
                         f'{escape(c["srt_name"])}'
                         f'<span class="mono" style="color:var(--text-4);'
                         f'margin-left:8px;">{escape(m.get("lines", "—"))} líneas · '
@@ -1332,6 +1350,14 @@ def _render_translation_queue() -> bool:
                         f'</div>',
                         unsafe_allow_html=True,
                     )
+                    if n_failed:
+                        st.markdown(
+                            f'<div style="font-size:11.5px;color:var(--warn-fg);'
+                            f'margin-top:2px;">Busca "[ERROR]" en el SRT '
+                            f'descargado: esas cues conservan el inglés original.'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
                 with colDL:
                     if c.get("result_bytes"):
                         st.download_button(

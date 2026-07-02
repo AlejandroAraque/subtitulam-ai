@@ -101,7 +101,20 @@ async def translate_subtitle(
 
         cues_target = result["translations"]
 
-        # ── 3. Reconstruir el SRT respetando timecodes originales ─────────
+        # ── 3a. Política ante cues fallidas (antes: fallo 100% silencioso) ─
+        # Si falló más del 20% del archivo (típico: API key inválida, 429
+        # en cascada), el job NO es un resultado utilizable: failed + 502.
+        # Con fallos parciales seguimos, pero avisando vía X-Failed-Cues.
+        n_failed = result.get("n_failed", 0)
+        n_cues = max(1, len(cues_source))
+        if n_failed / n_cues > 0.20:
+            msg = (f"Traducción fallida: {n_failed}/{n_cues} cues con error "
+                   f"(¿API key inválida o rate limit sostenido?)")
+            history_service.fail_job(db, job, msg)
+            job_logs.log(job_uuid, f"✖ {msg}", level="error")
+            raise HTTPException(status_code=502, detail=msg)
+
+        # ── 3b. Reconstruir el SRT respetando timecodes originales ────────
         final_texts = [cues_target.get(s.index, s.content) for s in original_subtitles]
         final_srt_content = srt_service.rebuild_srt(original_subtitles, final_texts)
 
@@ -141,6 +154,7 @@ async def translate_subtitle(
                 "X-Tokens-Completion": str(result["tokens_completion"]),
                 "X-Elapsed-Seconds":   f"{result['elapsed_s']:.2f}",
                 "X-Job-Id":            str(job.id),
+                "X-Failed-Cues":       str(n_failed),
             },
         )
 
