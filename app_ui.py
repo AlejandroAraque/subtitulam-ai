@@ -1896,11 +1896,12 @@ def render_historial():
 
         coste = _job_cost_eur(j.get("tokens_prompt"), j.get("tokens_completion"))
 
+        # Columnas compactas a propósito: la tabla debe caber SIN scroll
+        # horizontal. "Idiomas" (siempre EN→ES) y "CPL" (config, casi
+        # constante) no aportan lo suficiente para ocupar sitio.
         rows.append({
             "ID":       f"JOB-{j['id']:05d}",
             "Archivo":  j.get("filename", "—"),
-            "Idiomas":  f"EN → {j.get('target_lang', 'es').upper()}",
-            "CPL":      j.get("cpl", 0),
             "Líneas":   j.get("n_translations", 0),
             "% CPL":    j.get("cpl_compliance", 0.0),
             "Coste":    coste,
@@ -1917,15 +1918,17 @@ def render_historial():
         height=min(58 + n * 38, 600),
         column_config={
             "ID":       st.column_config.TextColumn("ID",     width="small"),
-            "Archivo":  st.column_config.TextColumn("Archivo", width="large"),
-            "CPL":      st.column_config.NumberColumn("CPL",   format="%d"),
-            "Líneas":   st.column_config.NumberColumn("Líneas", format="%d"),
-            "% CPL":    st.column_config.NumberColumn("% CPL", format="%.1f%%"),
+            "Archivo":  st.column_config.TextColumn("Archivo", width="medium"),
+            "Líneas":   st.column_config.NumberColumn("Líneas", format="%d", width="small"),
+            "% CPL":    st.column_config.NumberColumn("% CPL", format="%.1f%%", width="small"),
             "Coste":    st.column_config.NumberColumn(
-                "Coste", format="%.3f €",
+                "Coste", format="%.3f €", width="small",
                 help="Coste de la API de OpenAI para esta traducción "
                      "(tokens reales × tarifa gpt-4o).",
             ),
+            "Duración": st.column_config.TextColumn("Duración", width="small"),
+            "Fecha":    st.column_config.TextColumn("Fecha", width="medium"),
+            "Estado":   st.column_config.TextColumn("Estado", width="small"),
         },
     )
 
