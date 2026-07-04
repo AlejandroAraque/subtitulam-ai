@@ -1172,13 +1172,28 @@ def cancel_job(job_id: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 # CHEQUEO DE ACTUALIZACIÓN (en segundo plano, sin tocar la latencia de render)
 # ═══════════════════════════════════════════════════════════════════════════
+_UPDATE_CHECK_EVERY_S = 6 * 3600  # re-chequear cada 6 h
+
+
 @st.cache_resource
 def _update_check_state() -> dict:
-    """Compara la versión desplegada con la publicada en GitHub, UNA vez
-    por proceso y en un thread aparte: el render nunca espera por red.
-    El resultado aparece en la sidebar en el siguiente rerun natural.
+    """Estado compartido del chequeo de versión (singleton por proceso)."""
+    return {"local": None, "remote": None, "last_check": 0.0, "checking": False}
+
+
+def _maybe_check_updates() -> dict:
+    """Compara la versión desplegada con la publicada en GitHub.
+
+    El chequeo corre en un thread aparte y se relanza como mucho cada
+    _UPDATE_CHECK_EVERY_S: el render NUNCA espera por red, y una
+    instalación que lleve semanas encendida sigue enterándose de las
+    versiones nuevas (el diseño anterior chequeaba solo al arrancar).
     """
-    state: dict = {"local": None, "remote": None}
+    state = _update_check_state()
+    now = time.time()
+    if state["checking"] or now - state["last_check"] < _UPDATE_CHECK_EVERY_S:
+        return state
+    state["checking"] = True
 
     def _worker() -> None:
         import re as _re
@@ -1198,6 +1213,8 @@ def _update_check_state() -> dict:
                 state["remote"] = m.group(1)
         except Exception:
             pass  # sin red no hay aviso, y no pasa nada
+        state["last_check"] = time.time()
+        state["checking"] = False
 
     threading.Thread(target=_worker, daemon=True).start()
     return state
@@ -1247,7 +1264,7 @@ with st.sidebar:
 
     # Versión desplegada + aviso de actualización (chequeo en background;
     # si aún no terminó o no hay red, muestra el fallback sin aviso).
-    _upd = _update_check_state()
+    _upd = _maybe_check_updates()
     _v_local = _upd.get("local")
     _v_remote = _upd.get("remote")
     _vl, _vr = _version_tuple(_v_local), _version_tuple(_v_remote)
