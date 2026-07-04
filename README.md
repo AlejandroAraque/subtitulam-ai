@@ -322,10 +322,26 @@ git init
 git remote add origin https://github.com/AlejandroAraque/subtitulam-ai.git
 git fetch origin
 git reset --hard origin/main
+git branch --set-upstream-to=origin/main main
 ```
 
-El `.env` y los volúmenes de datos sobreviven (git no los gestiona). A
-partir de ahí, `.\scripts\actualizar.ps1` para cada actualización.
+(La última línea vincula la rama local con la remota — sin ella,
+`git pull` pide configurar el tracking.) El `.env` y los volúmenes de
+datos sobreviven (git no los gestiona). A partir de ahí,
+`.\scripts\actualizar.ps1` para cada actualización.
+
+**Actualización automática (recomendado para instalaciones de usuario
+final)**: una tarea programada de Windows puede ejecutar el script cada
+noche, de modo que la instalación siempre esté al día sin intervención:
+
+```powershell
+# Ejecutar UNA vez como administrador, desde la carpeta del proyecto:
+$accion = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PWD\scripts\actualizar.ps1`""
+$momento = New-ScheduledTaskTrigger -Daily -At 03:00
+Register-ScheduledTask -TaskName "Subtitulam-Actualizar" `
+  -Action $accion -Trigger $momento -Description "Actualiza Subtitulam cada noche"
+```
 
 ### Reseteo de la base de datos
 

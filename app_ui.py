@@ -1170,6 +1170,47 @@ def cancel_job(job_id: str) -> str:
         return "not_found"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# CHEQUEO DE ACTUALIZACIÓN (en segundo plano, sin tocar la latencia de render)
+# ═══════════════════════════════════════════════════════════════════════════
+@st.cache_resource
+def _update_check_state() -> dict:
+    """Compara la versión desplegada con la publicada en GitHub, UNA vez
+    por proceso y en un thread aparte: el render nunca espera por red.
+    El resultado aparece en la sidebar en el siguiente rerun natural.
+    """
+    state: dict = {"local": None, "remote": None}
+
+    def _worker() -> None:
+        import re as _re
+        try:
+            r = requests.get(f"{BACKEND_URL}/", timeout=5)
+            state["local"] = r.json().get("version")
+        except Exception:
+            pass
+        try:
+            r = requests.get(
+                "https://raw.githubusercontent.com/AlejandroAraque/"
+                "subtitulam-ai/main/pyproject.toml",
+                timeout=5,
+            )
+            m = _re.search(r'^version\s*=\s*"([^"]+)"', r.text, _re.M)
+            if m:
+                state["remote"] = m.group(1)
+        except Exception:
+            pass  # sin red no hay aviso, y no pasa nada
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return state
+
+
+def _version_tuple(v: str | None) -> tuple | None:
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (AttributeError, ValueError):
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════
 # brand con logo más refinado
@@ -1204,11 +1245,29 @@ with st.sidebar:
     selected = st.radio("nav", labels, key="nav_label", label_visibility="collapsed")
     st.session_state.page = PAGES[selected]
 
-    st.markdown("""
-    <div class="sb-foot">
-      <div class="dim">GPT-4o · v3.5</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Versión desplegada + aviso de actualización (chequeo en background;
+    # si aún no terminó o no hay red, muestra el fallback sin aviso).
+    _upd = _update_check_state()
+    _v_local = _upd.get("local")
+    _v_remote = _upd.get("remote")
+    _vl, _vr = _version_tuple(_v_local), _version_tuple(_v_remote)
+    if _vl and _vr and _vr > _vl:
+        st.markdown(
+            f'<div class="sb-foot">'
+            f'<div style="font-size:11px;color:var(--warn-fg);font-weight:600;">'
+            f'⬆ Actualización disponible (v{escape(_v_remote)})</div>'
+            f'<div class="dim" style="font-size:10.5px;">Se instalará en la '
+            f'actualización automática, o ejecuta scripts\\actualizar.ps1</div>'
+            f'<div class="dim">GPT-4o · v{escape(_v_local)}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        _v_txt = f"v{escape(_v_local)}" if _v_local else "v3.5"
+        st.markdown(
+            f'<div class="sb-foot"><div class="dim">GPT-4o · {_v_txt}</div></div>',
+            unsafe_allow_html=True,
+        )
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · WORKSPACE
