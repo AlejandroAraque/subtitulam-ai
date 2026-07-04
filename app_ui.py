@@ -1197,11 +1197,12 @@ def _maybe_check_updates() -> dict:
 
     def _worker() -> None:
         import re as _re
+        import sys as _sys
         try:
             r = requests.get(f"{BACKEND_URL}/", timeout=5)
             state["local"] = r.json().get("version")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[update-check] backend inaccesible: {e}", file=_sys.stderr)
         try:
             r = requests.get(
                 "https://raw.githubusercontent.com/AlejandroAraque/"
@@ -1211,10 +1212,12 @@ def _maybe_check_updates() -> dict:
             m = _re.search(r'^version\s*=\s*"([^"]+)"', r.text, _re.M)
             if m:
                 state["remote"] = m.group(1)
-        except Exception:
-            pass  # sin red no hay aviso, y no pasa nada
+        except Exception as e:
+            print(f"[update-check] GitHub inaccesible: {e}", file=_sys.stderr)
         state["last_check"] = time.time()
         state["checking"] = False
+        print(f"[update-check] local={state['local']} remote={state['remote']}",
+              file=_sys.stderr)
 
     threading.Thread(target=_worker, daemon=True).start()
     return state
