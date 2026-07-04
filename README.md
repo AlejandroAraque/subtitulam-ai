@@ -300,6 +300,33 @@ eval/
 | `DEFAULT_CPL_LIMIT` | no | `38` | Límite de caracteres por línea (38 = UNE 153010 TV; 42 = Netflix) |
 | `DEFAULT_TARGET_LANG` | no | `es` | Idioma destino por defecto |
 
+### Actualizar una instalación existente
+
+Con la carpeta conectada al repositorio (clonada con git), actualizar a la
+última versión publicada es un solo comando:
+
+```powershell
+.\scripts\actualizar.ps1
+```
+
+El script hace `git pull` + rebuild + reinicio y comprueba el estado. Los
+datos (historial, glosario, memoria de traducción) viven en volúmenes
+Docker y no se tocan.
+
+**Si la instalación se hizo desde un paquete portable** (zip del código,
+sin git), conectarla al repositorio una sola vez — desde la carpeta del
+proyecto, con Git instalado:
+
+```powershell
+git init
+git remote add origin https://github.com/AlejandroAraque/subtitulam-ai.git
+git fetch origin
+git reset --hard origin/main
+```
+
+El `.env` y los volúmenes de datos sobreviven (git no los gestiona). A
+partir de ahí, `.\scripts\actualizar.ps1` para cada actualización.
+
 ### Reseteo de la base de datos
 
 **Local (sin Docker):**
