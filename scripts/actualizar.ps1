@@ -20,6 +20,24 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 Write-Host ""
 Write-Host "=== Actualizando Subtitulam ===" -ForegroundColor Cyan
 
+# Esperar a que Docker Desktop esté listo (hasta 5 min). Necesario cuando
+# la tarea programada corre al iniciar sesión: Docker tarda 1-2 min en
+# arrancar y sin esta espera el build fallaría.
+Write-Host ""
+Write-Host "[0/4] Esperando a Docker..." -ForegroundColor Yellow
+$intentos = 0
+while ($true) {
+    docker info *> $null
+    if ($LASTEXITCODE -eq 0) { break }
+    $intentos++
+    if ($intentos -ge 30) {
+        Write-Host "ERROR: Docker no ha arrancado en 5 minutos. Abre Docker Desktop y reintenta." -ForegroundColor Red
+        exit 1
+    }
+    Start-Sleep -Seconds 10
+}
+Write-Host "Docker listo." -ForegroundColor Green
+
 Write-Host ""
 Write-Host "[1/4] Descargando la ultima version desde GitHub..." -ForegroundColor Yellow
 git pull --ff-only
