@@ -330,28 +330,30 @@ git branch --set-upstream-to=origin/main main
 datos sobreviven (git no los gestiona). A partir de ahí,
 `.\scripts\actualizar.ps1` para cada actualización.
 
-**Actualización automática (recomendado para instalaciones de usuario
-final)**: una tarea programada de Windows ejecuta el script sin
-intervención. Para un **portátil** (que no está encendido de noche), el
-disparador correcto es "al iniciar sesión", con un pequeño retraso para
-que Docker Desktop arranque, y con permiso para correr con batería:
+**Actualización automática + botón "Actualizar ahora" (recomendado para
+instalaciones de usuario final)**: un único script registra las dos
+tareas programadas de Windows que lo hacen todo — ejecutarlo UNA vez
+como administrador, desde la carpeta del proyecto:
 
 ```powershell
-# Ejecutar UNA vez como administrador, desde la carpeta del proyecto:
-$accion = New-ScheduledTaskAction -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PWD\scripts\actualizar.ps1`""
-$momento = New-ScheduledTaskTrigger -AtLogOn
-$momento.Delay = "PT3M"   # espera 3 min tras iniciar sesión
-$ajustes = New-ScheduledTaskSettingsSet -StartWhenAvailable `
-  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "Subtitulam-Actualizar" `
-  -Action $accion -Trigger $momento -Settings $ajustes `
-  -Description "Actualiza Subtitulam al iniciar sesión"
+.\scripts\instalar_tareas.ps1
 ```
 
-Para un **equipo de sobremesa/servidor** siempre encendido, cambiar el
-disparador por uno nocturno: `New-ScheduledTaskTrigger -Daily -At 03:00`.
-(El propio script espera a que Docker esté listo antes de empezar.)
+Qué queda instalado:
+
+- **Al iniciar sesión** (pensado para portátiles): la instalación se
+  actualiza sola al encender el equipo, con margen para que Docker
+  Desktop arranque y permiso para correr con batería.
+- **Botón "Actualizar ahora"**: cuando hay versión nueva, la barra
+  lateral de la app muestra el aviso y un botón. Al pulsarlo, la UI
+  deja una señal que el vigilante del host (cada 5 min) recoge para
+  ejecutar la actualización — el contenedor no puede reconstruirse a
+  sí mismo, por eso el rodeo. Para el usuario: clic, esperar unos
+  minutos, abrir pestaña nueva.
+
+Para un equipo siempre encendido se puede añadir además un disparador
+nocturno (`New-ScheduledTaskTrigger -Daily -At 03:00`) con
+`Register-ScheduledTask` sobre `scripts/actualizar.ps1`.
 
 ### Reseteo de la base de datos
 

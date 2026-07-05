@@ -370,6 +370,31 @@ def get_job_logs_endpoint(job_uuid: str, since: int = 0):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# SYSTEM  (operaciones de mantenimiento de la instalación)
+# ══════════════════════════════════════════════════════════════════════════
+@router.post("/system/request-update", status_code=202)
+def request_update():
+    """Solicita la actualización de la instalación.
+
+    El contenedor no puede reconstruirse a sí mismo, así que esto solo
+    deja un archivo-señal en el volumen de datos. Una tarea programada
+    del HOST (scripts/atender_actualizacion.ps1, cada 5 min) detecta la
+    señal y ejecuta scripts/actualizar.ps1. Idempotente: pulsar varias
+    veces no encola varias actualizaciones.
+    """
+    import time as _time
+
+    from app.core.config import DATA_DIR
+
+    flag = DATA_DIR / "update-requested"
+    flag.write_text(str(_time.time()), encoding="utf-8")
+    return {
+        "scheduled": True,
+        "detail": "Actualización solicitada; se aplicará en los próximos minutos.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # OCR  (detección y lectura de texto incrustado en frames de vídeo)
 # ══════════════════════════════════════════════════════════════════════════
 _VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".avi")

@@ -1276,12 +1276,30 @@ with st.sidebar:
             f'<div class="sb-foot">'
             f'<div style="font-size:11px;color:var(--warn-fg);font-weight:600;">'
             f'⬆ Actualización disponible (v{escape(_v_remote)})</div>'
-            f'<div class="dim" style="font-size:10.5px;">Se instalará en la '
-            f'actualización automática, o ejecuta scripts\\actualizar.ps1</div>'
             f'<div class="dim">GPT-4o · v{escape(_v_local)}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
+        if st.session_state.get("_update_requested"):
+            st.markdown(
+                '<div class="dim" style="font-size:10.5px;">Actualización en '
+                'camino: la app se reiniciará sola en unos minutos. Después, '
+                'cierra esta pestaña y abre una nueva.</div>',
+                unsafe_allow_html=True,
+            )
+        elif st.button("⬆ Actualizar ahora", key="btn_request_update",
+                       use_container_width=True, type="secondary"):
+            try:
+                r = requests.post(f"{BACKEND_URL}/system/request-update", timeout=5)
+                r.raise_for_status()
+                st.session_state._update_requested = True
+                st.rerun()
+            except requests.exceptions.RequestException:
+                st.toast(
+                    "No se pudo solicitar la actualización (¿backend caído?). "
+                    "Alternativa: ejecutar scripts\\actualizar.ps1",
+                    icon="⚠️",
+                )
     else:
         _v_txt = f"v{escape(_v_local)}" if _v_local else "v3.5"
         st.markdown(
