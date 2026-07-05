@@ -2957,9 +2957,11 @@ def render_preview():
     with cfg_col2:
         min_conf = st.slider(
             "Confianza mínima",
-            min_value=0.0, max_value=1.0, value=0.4, step=0.05,
+            min_value=0.0, max_value=1.0, value=0.35, step=0.05,
             key="prv_cv_min_conf",
-            help="Descarta detecciones con confianza menor. 0.4 buen default.",
+            help="Descarta detecciones con confianza menor. Los títulos con "
+                 "tipografías estilizadas suelen salir con confianza 0.3-0.5; "
+                 "si ves ruido, sube el umbral.",
         )
     with cfg_col3:
         st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)

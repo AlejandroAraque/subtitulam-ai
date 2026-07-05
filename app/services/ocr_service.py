@@ -339,7 +339,24 @@ def read_text_in_frames(
 
         try:
             # readtext devuelve [(bbox_4_puntos, text, confidence), ...]
-            raw = reader.readtext(scaled)
+            #
+            # Parámetros validados empíricamente sobre el título de Candy Bar
+            # ("c a n d y  [bar]", rosa fino sobre negro), 2026-07-05:
+            #   - width_ths=1.5: agrupa letras muy espaciadas en una sola
+            #     detección (con el default 0.5 salían fragmentos sueltos).
+            #   - text/low/link threshold suaves: capturan trazos finos y
+            #     estilizados que los defaults descartaban.
+            #   - SIN mag_ratio: se probó 1.5 y 2.0 — no mejora la lectura
+            #     y multiplica ×2-7 el tiempo por frame.
+            # Resultado del benchmark: mejor agrupado Y ~1.6× más rápido
+            # que los defaults (1.8s vs 2.9s por frame 1024px en CPU).
+            raw = reader.readtext(
+                scaled,
+                width_ths=1.5,
+                text_threshold=0.5,
+                low_text=0.25,
+                link_threshold=0.25,
+            )
         except Exception as e:
             logger.warning("readtext frame %.2fs falló: %s", ts, e)
             continue
