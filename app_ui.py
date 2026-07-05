@@ -2083,6 +2083,107 @@ def render_historial():
         _dialog_confirm_clear_history(jobs)
 
 # ═══════════════════════════════════════════════════════════════════════════
+# OCR EN SEGUNDO PLANO (detección de texto sin bloquear la UI)
+# ═══════════════════════════════════════════════════════════════════════════
+# Mismo patrón que la cola de traducción: el POST al backend vive en un
+# thread y el estado en cache_resource. Antes, la llamada era síncrona en
+# el hilo de render: cualquier interacción (mover un slider) relanzaba el
+# script y abortaba la espera — el backend seguía trabajando pero el
+# resultado se perdía y la UI parecía "colgada".
+
+@st.cache_resource
+def _get_ocr_state() -> dict:
+    return {
+        "running_uuid": None,   # uuid del OCR en curso (None = libre)
+        "video_name":   "",
+        "result":       None,   # lista de detecciones al terminar
+        "cancelled":    False,
+        "error":        None,
+        "started_at":   0.0,
+    }
+
+
+def _ocr_worker(state: dict, video_name: str, video_bytes: bytes,
+                interval_s: float, min_conf: float, translate_on: bool,
+                ocr_uuid: str) -> None:
+    """Ejecuta la detección contra el backend. Vive en un thread daemon."""
+    import base64 as _b64
+    try:
+        r = requests.post(
+            f"{BACKEND_URL}/ocr/detect",
+            files={"file": (video_name, video_bytes, "application/octet-stream")},
+            data={
+                "interval_s":     interval_s,
+                "min_confidence": min_conf,
+                "translate":      str(translate_on).lower(),
+                "job_uuid":       ocr_uuid,
+            },
+            timeout=(10, 3600),
+        )
+        r.raise_for_status()
+        payload = r.json()
+        if payload.get("cancelled"):
+            state["cancelled"] = True
+            state["result"] = None
+        else:
+            detections = []
+            for d in payload.get("detections", []):
+                thumb = d.pop("thumbnail_b64", "")
+                try:
+                    d["thumbnail"] = _b64.b64decode(thumb) if thumb else b""
+                except Exception:
+                    d["thumbnail"] = b""
+                detections.append(d)
+            state["result"] = detections
+    except requests.exceptions.RequestException as e:
+        state["error"] = str(e)
+    finally:
+        state["running_uuid"] = None
+
+
+def _render_ocr_progress(state: dict) -> None:
+    """Barra de progreso real del OCR en curso + botón cancelar.
+
+    El backend publica el avance frame a frame en job_logs; aquí se lee
+    por polling (autorefresh) y se convierte en barra.
+    """
+    import re as _re
+
+    uuid_ = state["running_uuid"]
+    st_autorefresh(interval=2000, key="ocr_autorefresh")
+
+    logs = _fetch_job_logs(uuid_, since=0)
+    frame_done, frame_total = 0, 0
+    last_msg = "Enviando vídeo al motor…"
+    for entry in logs:
+        msg = entry.get("message", "")
+        m = _re.search(r"OCR frame (\d+)/(\d+)", msg)
+        if m:
+            frame_done, frame_total = int(m.group(1)), int(m.group(2))
+        last_msg = msg
+
+    bar_col, cancel_col = st.columns([5, 1], gap="small")
+    with bar_col:
+        if frame_total:
+            st.progress(
+                min(0.99, frame_done / frame_total),
+                text=f"Analizando fotograma {frame_done}/{frame_total} · "
+                     f"{escape(state['video_name'])}",
+            )
+        else:
+            st.progress(0.02, text=f"{last_msg}")
+    with cancel_col:
+        if st.button("✖ Cancelar", key="ocr_cancel_btn",
+                     use_container_width=True, type="secondary"):
+            try:
+                requests.post(f"{BACKEND_URL}/ocr/cancel/{uuid_}", timeout=5)
+                st.toast("Cancelando… se detendrá al terminar el fotograma "
+                         "actual.", icon="✖")
+            except requests.exceptions.RequestException:
+                st.toast("No se pudo contactar con el backend.", icon="⚠️")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # PÁGINA · PREVIEW (QA visual del .srt traducido sobre el vídeo)
 # ═══════════════════════════════════════════════════════════════════════════
 @st.dialog("Editar cue")
@@ -2873,11 +2974,13 @@ def render_preview():
         )
     with btn_col:
         st.markdown('<div style="height:26px;"></div>', unsafe_allow_html=True)
+        _ocr_busy = _get_ocr_state()["running_uuid"] is not None
         detect_btn = st.button(
-            "🔍 Detectar texto",
+            "⏳ Detectando…" if _ocr_busy else "🔍 Detectar texto",
             use_container_width=True,
             key="prv_cv_detect_btn",
             type="secondary",
+            disabled=_ocr_busy,
         )
 
     # Si el usuario sube un vídeo distinto, invalidar detecciones previas
@@ -2887,58 +2990,54 @@ def render_preview():
         st.session_state.prv_cv_page = 0
         st.session_state.prv_cv_video_sig = current_video_sig
 
-    if detect_btn:
-        # El OCR corre en el BACKEND vía HTTP (antes era un import
-        # in-process de app.services, que rompía en Docker: la imagen
-        # del frontend no contiene app/ ni la API key de OpenAI).
-        import base64 as _b64
-        import time as _time
+    # ── OCR asíncrono: lanzar / progreso / recoger resultado ───────────
+    ocr_state = _get_ocr_state()
+
+    if detect_btn and ocr_state["running_uuid"] is None:
         import uuid as _uuid
-
         ocr_uuid = str(_uuid.uuid4())
-        t0 = _time.time()
-        with st.spinner(
-            "Detectando texto en el backend… Esto puede tardar varios "
-            "minutos según la duración del vídeo (primera vez además "
-            "descarga los modelos EasyOCR, ~150 MB)."
-        ):
-            try:
-                r = requests.post(
-                    f"{BACKEND_URL}/ocr/detect",
-                    files={"file": (video_file.name, video_file.getvalue(),
-                                    "application/octet-stream")},
-                    data={
-                        "interval_s":     interval_s,
-                        "min_confidence": min_conf,
-                        "translate":      str(translate_on).lower(),
-                        "job_uuid":       ocr_uuid,
-                    },
-                    timeout=(10, 3600),
-                )
-                r.raise_for_status()
-                raw = r.json().get("detections", [])
-            except requests.exceptions.RequestException as e:
-                st.error(f"OCR falló: {e}")
-                raw = None
+        # Reset del estado y lanzamiento del worker. Los bytes del vídeo
+        # se leen AQUÍ (hilo principal): el thread no puede tocar el
+        # file_uploader de Streamlit.
+        ocr_state.update({
+            "running_uuid": ocr_uuid,
+            "video_name":   video_file.name,
+            "result":       None,
+            "cancelled":    False,
+            "error":        None,
+            "started_at":   time.time(),
+        })
+        threading.Thread(
+            target=_ocr_worker,
+            args=(ocr_state, video_file.name, video_file.getvalue(),
+                  interval_s, min_conf, translate_on, ocr_uuid),
+            daemon=True,
+        ).start()
+        st.rerun()
+    elif detect_btn:
+        st.toast("Ya hay una detección en curso — cancélala primero si "
+                 "quieres relanzar con otros parámetros.", icon="⏳")
 
-        if raw is not None:
-            # Decodificar thumbnails base64 → bytes (mismo shape que antes).
-            # Un thumbnail malformado no debe tirar la página entera: se
-            # sustituye por vacío y el render lo salta.
-            detections = []
-            for d in raw:
-                thumb = d.pop("thumbnail_b64", "")
-                try:
-                    d["thumbnail"] = _b64.b64decode(thumb) if thumb else b""
-                except Exception:
-                    d["thumbnail"] = b""
-                detections.append(d)
-
-            dt = _time.time() - t0
-            st.toast(f"OCR: {len(detections)} textos en {dt:.0f}s", icon="🔍")
-            st.session_state.prv_cv_detections = detections
-            st.session_state.prv_cv_page = 0
-            st.rerun()  # forzar re-render con los resultados
+    if ocr_state["running_uuid"] is not None:
+        # En curso: barra de progreso real + cancelar. Tocar sliders u
+        # otras partes de la página ya NO afecta: el trabajo vive en su
+        # propio thread y esta sección solo lo observa.
+        _render_ocr_progress(ocr_state)
+    elif ocr_state["result"] is not None:
+        # Terminado: recoger el resultado y limpiarlo del estado compartido
+        detections = ocr_state["result"]
+        ocr_state["result"] = None
+        dt = time.time() - ocr_state["started_at"]
+        st.toast(f"OCR: {len(detections)} textos en {dt:.0f}s", icon="🔍")
+        st.session_state.prv_cv_detections = detections
+        st.session_state.prv_cv_page = 0
+        st.rerun()
+    elif ocr_state["cancelled"]:
+        ocr_state["cancelled"] = False
+        st.toast("Detección cancelada.", icon="✖")
+    elif ocr_state["error"]:
+        st.error(f"La detección falló: {ocr_state['error']}")
+        ocr_state["error"] = None
 
     # Mostrar resultados si los hay
     detections = st.session_state.get("prv_cv_detections")

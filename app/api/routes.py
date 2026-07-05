@@ -400,6 +400,27 @@ def request_update():
 _VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
 _MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
+# Cancelación cooperativa del OCR: la UI marca el uuid y el callback de
+# progreso aborta en el siguiente frame. Un set simple basta (single-writer
+# por uuid; el GIL protege add/discard).
+_OCR_CANCELLED: set[str] = set()
+
+
+class _OcrCancelled(Exception):
+    """Señal interna: el usuario canceló la detección en curso."""
+
+
+@router.post("/ocr/cancel/{job_uuid}", status_code=202)
+def ocr_cancel(job_uuid: str):
+    """Marca una detección OCR para cancelación.
+
+    El corte ocurre al terminar el frame en curso (~1-10 s después),
+    no instantáneamente: el OCR de un frame no es interrumpible.
+    """
+    _OCR_CANCELLED.add(job_uuid)
+    job_logs.log(job_uuid, "✖ Cancelación solicitada…", level="warn")
+    return {"cancelling": True}
+
 
 @router.post("/ocr/detect")
 def ocr_detect(
@@ -451,15 +472,21 @@ def ocr_detect(
         job_logs.log(job_uuid, f"🎞 {len(frames)} frames extraídos · cargando EasyOCR…")
 
         def _on_progress(done: int, total: int) -> None:
-            if done == 1 or done % 10 == 0 or done == total:
-                job_logs.log(job_uuid, f"🔍 OCR frame {done}/{total}")
+            if job_uuid and job_uuid in _OCR_CANCELLED:
+                raise _OcrCancelled()
+            # Cada frame: la UI usa estas líneas para pintar la barra real.
+            job_logs.log(job_uuid, f"🔍 OCR frame {done}/{total}")
 
-        detections = ocr_service.read_text_in_frames(
-            frames,
-            progress_callback=_on_progress,
-            min_confidence=min_confidence,
-            filter_subtitle_zone=True,
-        )
+        try:
+            detections = ocr_service.read_text_in_frames(
+                frames,
+                progress_callback=_on_progress,
+                min_confidence=min_confidence,
+                filter_subtitle_zone=True,
+            )
+        except _OcrCancelled:
+            job_logs.log(job_uuid, "✖ OCR cancelado por el usuario", level="warn")
+            return {"detections": [], "cancelled": True}
         job_logs.log(job_uuid, f"🔍 OCR completo · {len(detections)} frames con texto")
 
         if detections and translate:
@@ -489,6 +516,7 @@ def ocr_detect(
         job_logs.log(job_uuid, f"✖ OCR falló: {e}", level="error")
         raise HTTPException(status_code=500, detail=f"Error en OCR: {str(e)[:200]}")
     finally:
+        _OCR_CANCELLED.discard(job_uuid)
         if tmp_path:
             try:
                 _Path(tmp_path).unlink()
