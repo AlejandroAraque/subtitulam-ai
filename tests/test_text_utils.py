@@ -6,9 +6,18 @@ def test_linea_corta_queda_intacta():
     assert ajustar_cpl_optimo("Hola mundo", max_cpl=38) == "Hola mundo"
 
 
-def test_multilinea_que_cumple_queda_intacta():
+def test_multilinea_que_cabe_en_una_se_fusiona():
+    # Contrato v3.6 (informe del revisor, img. 6): si el texto cabe en
+    # una línea, va en una — no se reproduce la segmentación del inglés.
     texto = "Primera línea corta\nSegunda también"
-    assert ajustar_cpl_optimo(texto, max_cpl=38) == texto
+    assert ajustar_cpl_optimo(texto, max_cpl=38) == "Primera línea corta Segunda también"
+
+
+def test_multilinea_que_no_cabe_se_resegmenta_bien():
+    texto = "Primera línea bastante larga\ny la segunda también lo es"
+    out = ajustar_cpl_optimo(texto, max_cpl=38)
+    assert len(out.split("\n")) == 2
+    assert all(len(ln) <= 38 for ln in out.split("\n"))
 
 
 def test_texto_largo_se_acerca_al_limite():
