@@ -875,11 +875,12 @@ def _process_translation_raw(
     Si se pasa `job_uuid`, el backend acumula logs por ese id y pueden
     consultarse en vivo vía GET /jobs/by-uuid/{uuid}/logs.
     """
-    # timeout=(connect, read): conectar debe ser inmediato (10 s), pero la
-    # respuesta tarda lo que tarde el job entero — el README documenta hasta
-    # 15 min/película, así que 30 min de margen. Con el antiguo timeout=600
-    # cualquier job >10 min se marcaba "failed" en la UI aunque el backend
-    # terminara bien y lo persistiera (dinero gastado, resultado inaccesible).
+    # timeout=(connect, read): conectar debe ser inmediato (10 s); la
+    # respuesta tarda lo que tarde el job entero. Lección del piloto
+    # (2026-07-07): películas REALES de ~2h con ~2.000 cues tardan 30-60+
+    # min y el límite anterior de 1800s las mataba a los 30:00 exactos
+    # mientras el backend seguía traduciendo. 3h de margen hasta migrar
+    # al patrón 202+polling (ARQ-02), que es el arreglo de verdad.
     response = requests.post(
         f"{BACKEND_URL}/translate",
         files={"file": (srt_name, srt_bytes, "text/plain")},
@@ -889,7 +890,7 @@ def _process_translation_raw(
             "cpl":         cpl_limit,
             "job_uuid":    job_uuid,
         },
-        timeout=(10, 1800),
+        timeout=(10, 10800),
     )
     response.raise_for_status()
 
