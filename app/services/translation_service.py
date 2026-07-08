@@ -6,7 +6,23 @@ from typing import Dict
 from app.core import job_logs
 from app.core.config import OPENAI_MAX_TOKENS, OPENAI_MODEL, OPENAI_TEMPERATURE
 from app.core.openai_client import get_openai
-from app.utils.text_utils import ajustar_cpl_optimo
+from app.utils.text_utils import ajustar_cpl_optimo, visible_chars
+
+# Velocidad de lectura máxima (caracteres por segundo). UNE 153010 / Netflix
+# se mueven en 15-17; usamos 17 como techo, señalado por el revisor del piloto.
+CPS_LIMIT = 17.0
+
+
+def _char_budget(duration_s: float, cpl_limit: int) -> int:
+    """Máximo de caracteres visibles para un cue de esta duración.
+
+    Es el mínimo entre lo que permite la velocidad de lectura
+    (duración × CPS) y lo que caben físicamente en 2 líneas (2 × CPL).
+    Un cue de 1,2 s solo admite ~20 caracteres aunque quepan 76.
+    """
+    por_cps = int(duration_s * CPS_LIMIT)
+    por_cpl = 2 * cpl_limit
+    return max(1, min(por_cps, por_cpl))
 
 # ── Logger configurado para trazar cada batch ───────────────────────────────
 logger = logging.getLogger("subtitulam.translation")
@@ -523,6 +539,78 @@ async def _retrieve_for_batch(
     return results[:max_total]
 
 
+async def _condensar_violaciones(
+    translated_dict: Dict[int, str],
+    durations: Dict[int, float],
+    cpl_limit: int,
+    target_lang: str,
+    job_uuid: str,
+) -> int:
+    """Segunda pasada quirúrgica: reescribe SOLO las cues que exceden su
+    presupuesto de caracteres (velocidad de lectura) pidiendo al modelo
+    que diga lo mismo con menos. Devuelve cuántas cues se condensaron.
+
+    Se hace en un único batch (los infractores suelen ser minoría), con
+    el presupuesto concreto de cada cue en el prompt. No toca cues
+    [ERROR] ni las que ya cumplen.
+    """
+    infractores = []
+    for idx, texto in translated_dict.items():
+        if texto.startswith("[ERROR]"):
+            continue
+        dur = durations.get(idx)
+        if not dur:
+            continue
+        budget = _char_budget(dur, cpl_limit)
+        if visible_chars(texto) > budget:
+            infractores.append((idx, texto, budget, dur))
+
+    if not infractores:
+        return 0
+
+    job_logs.log(
+        job_uuid,
+        f"✂ Condensando {len(infractores)} cue(s) que superan la velocidad "
+        f"de lectura ({CPS_LIMIT:.0f} CPS)…",
+    )
+
+    lang_label = TARGET_LANGUAGES.get(target_lang, TARGET_LANGUAGES["es"])
+    lineas = [
+        f"Reescribe cada subtítulo en {lang_label} para que quepa en el "
+        f"máximo de caracteres indicado entre corchetes, SIN perder el "
+        f"sentido ni el tono. Es subtitulado: prioriza lo esencial, elimina "
+        f"relleno. Devuelve cada uno con su número y dos puntos.\n",
+    ]
+    for idx, texto, budget, _ in infractores:
+        plano = texto.replace("\n", " ")
+        lineas.append(f"{idx}: [≤{budget}] {plano}")
+    prompt = "\n".join(lineas)
+
+    try:
+        resp = await get_openai().chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=OPENAI_MAX_TOKENS,
+        )
+        condensadas = parsear_traducciones(resp.choices[0].message.content.strip())
+    except Exception as e:
+        logger.warning("Condensación falló (no bloqueante): %s", e)
+        return 0
+
+    n = 0
+    idx_validos = {idx for idx, _, _, _ in infractores}
+    for idx, nuevo in condensadas.items():
+        if idx not in idx_validos or not nuevo.strip():
+            continue
+        # Solo se acepta si de verdad recorta (evita empeorar)
+        original = translated_dict[idx]
+        if visible_chars(nuevo) < visible_chars(original):
+            translated_dict[idx] = ajustar_cpl_optimo(nuevo, max_cpl=cpl_limit)
+            n += 1
+    return n
+
+
 async def translate_texts(
     texts_dict: Dict[int, str],
     chunk_size: int = 5,
@@ -530,6 +618,7 @@ async def translate_texts(
     context: str = "",
     cpl_limit: int = 38,
     *,
+    durations: Dict[int, float] | None = None,
     job_id: int | None = None,
     filename: str = "",
     use_rag: bool = True,
@@ -741,13 +830,26 @@ async def translate_texts(
             for idx, texto in bloque:
                 translated_dict[idx] = f"[ERROR] {texto}"
 
+    # ── Pasada quirúrgica de velocidad de lectura (CPS) ───────────────────
+    # Con las duraciones disponibles, condensa las cues que superan su
+    # presupuesto de caracteres. El revisor del piloto marcó el CPS >17
+    # como problema técnico recurrente que el pipeline no controlaba.
+    n_condensadas = 0
+    if durations:
+        try:
+            n_condensadas = await _condensar_violaciones(
+                translated_dict, durations, cpl_limit, target_lang, job_uuid,
+            )
+        except Exception as e:
+            logger.warning("Pasada de condensación falló (no bloqueante): %s", e)
+
     dt_total = time.time() - t_job_start
     n_failed = sum(1 for t in translated_dict.values() if t.startswith("[ERROR]"))
     logger.info(
         "── JOB COMPLETO ──  %.2fs · tokens total prompt=%d completion=%d · "
-        "cues fallidas=%d/%d",
+        "cues fallidas=%d/%d · condensadas=%d",
         dt_total, total_prompt_tokens, total_completion_tokens,
-        n_failed, len(items),
+        n_failed, len(items), n_condensadas,
     )
     if n_failed:
         job_logs.log(

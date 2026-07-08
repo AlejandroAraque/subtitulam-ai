@@ -51,6 +51,12 @@ async def translate_subtitle(
         text_content = content.decode("utf-8")
         original_subtitles = srt_service.parse_srt(text_content)
         cues_source = {s.index: s.content for s in original_subtitles}
+        # Duración de cada cue en segundos: la usa el pipeline para la
+        # pasada de velocidad de lectura (CPS). Antes se descartaba.
+        cues_duration = {
+            s.index: (s.end - s.start).total_seconds()
+            for s in original_subtitles
+        }
         job_logs.log(
             job_uuid,
             f"📥 SRT recibido · {len(content) / 1024:.1f} KB · "
@@ -87,6 +93,7 @@ async def translate_subtitle(
                 target_lang=target_lang,
                 context=context,
                 cpl_limit=cpl,
+                durations=cues_duration,
                 job_id=job.id,
                 filename=file.filename,
                 use_rag=True,

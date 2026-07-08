@@ -49,6 +49,14 @@ _NO_CORTAR_TRAS = {
 _PUNTUACION_FIN = (".", ",", ";", ":", "?", "!", "…", "—", "-")
 
 
+def visible_chars(texto: str) -> int:
+    """Caracteres que el espectador realmente lee: sin tags HTML y
+    contando el texto de todas las líneas (los saltos de línea no
+    cuentan para la velocidad de lectura)."""
+    limpio = re.sub(r"<[^>]+>", "", texto)
+    return len(limpio.replace("\n", " ").strip())
+
+
 def _es_dialogo_multilinea(texto: str) -> bool:
     """True si el cue son líneas de diálogo con guion (cada hablante una
     línea): esa segmentación es semántica y no debe tocarse."""
