@@ -18,5 +18,11 @@ import app.core.config  # noqa: F401 — fuerza load_dotenv() antes del cliente
 
 @lru_cache(maxsize=1)
 def get_openai() -> AsyncOpenAI:
-    """Devuelve el cliente AsyncOpenAI singleton (creado en el primer uso)."""
-    return AsyncOpenAI()
+    """Devuelve el cliente AsyncOpenAI singleton (creado en el primer uso).
+
+    max_retries=5: el SDK reintenta 429/5xx con backoff exponencial
+    respetando Retry-After. Con el default (2), una ráfaga de rate limit
+    marcaba chunks [ERROR] en cascada y al superar el 20% el job entero
+    moría con los tokens ya pagados.
+    """
+    return AsyncOpenAI(max_retries=5)

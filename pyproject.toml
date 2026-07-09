@@ -33,7 +33,8 @@ dev = [
 line-length = 100
 # app_ui.py tiene ~64 líneas >100 por HTML embebido; se irá limpiando
 # al modularizar la UI. Mientras tanto el linter cubre el backend.
-exclude = ["app_ui.py", ".venv"]
+# data/ son artefactos y scripts sueltos del showcase, no código de la app.
+exclude = ["app_ui.py", ".venv", "data"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]   # errores, pyflakes, warnings, isort

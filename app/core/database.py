@@ -2,7 +2,7 @@
 Motor SQLAlchemy + factory de sesiones + Base declarativa.
 Importa desde aquí para hablar con la base de datos.
 """
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.core.config import DATABASE_URL
@@ -15,6 +15,19 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
     future=True,
 )
+
+if DATABASE_URL.startswith("sqlite"):
+    # WAL: lectores concurrentes con un escritor (el journal por defecto
+    # da "database is locked" en cuanto un job inserta ~1.500 Translations
+    # mientras otro request lista el historial). busy_timeout espera en
+    # vez de fallar; synchronous=NORMAL es el punto seguro con WAL.
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 
 # ── Session factory ───────────────────────────────────────────────────────
 # Cada petición pide una sesión nueva con SessionLocal(),
