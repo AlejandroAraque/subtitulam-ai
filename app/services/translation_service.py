@@ -6,7 +6,11 @@ from typing import Dict
 from app.core import job_logs
 from app.core.config import OPENAI_MAX_TOKENS, OPENAI_MODEL, OPENAI_TEMPERATURE
 from app.core.openai_client import get_openai
-from app.utils.text_utils import ajustar_cpl_optimo, visible_chars
+from app.utils.text_utils import (
+    _es_dialogo_multilinea,
+    ajustar_cpl_optimo,
+    visible_chars,
+)
 
 # Velocidad de lectura máxima (caracteres por segundo). UNE 153010 / Netflix
 # se mueven en 15-17; usamos 17 como techo, señalado por el revisor del piloto.
@@ -539,6 +543,44 @@ async def _retrieve_for_batch(
     return results[:max_total]
 
 
+def _repartir_dialogo(texto: str) -> str:
+    """Re-parte por hablantes un diálogo que el LLM devolvió aplanado:
+    '-No vengas. -Vale.' → '-No vengas.\\n-Vale.'"""
+    if "\n" in texto:
+        return texto
+    partes = re.split(r"\s+(?=[-–—]\S)", texto.strip())
+    if len(partes) >= 2:
+        return "\n".join(p.strip() for p in partes)
+    return texto
+
+
+def _contar_violaciones(
+    translated_dict: Dict[int, str],
+    durations: Dict[int, float],
+    cpl_limit: int,
+) -> list[tuple[int, str, int]]:
+    """Cues que superan su presupuesto de caracteres, como
+    (idx, texto, presupuesto). Excluye cues [ERROR] y duraciones
+    inválidas (end<start por timecodes corruptos daría presupuesto 1)."""
+    infractores = []
+    for idx, texto in translated_dict.items():
+        if texto.startswith("[ERROR]"):
+            continue
+        dur = durations.get(idx)
+        if not dur or dur <= 0:
+            continue
+        budget = _char_budget(dur, cpl_limit)
+        if visible_chars(texto) > budget:
+            infractores.append((idx, texto, budget))
+    return infractores
+
+
+# Infractores por llamada de condensación. Con max_tokens=800 un batch
+# grande se truncaba en silencio: la mayoría quedaba sin condensar y la
+# última cue podía llegar cortada a mitad de frase y colarse en el SRT.
+_CONDENSAR_CHUNK = 20
+
+
 async def _condensar_violaciones(
     translated_dict: Dict[int, str],
     durations: Dict[int, float],
@@ -550,21 +592,11 @@ async def _condensar_violaciones(
     presupuesto de caracteres (velocidad de lectura) pidiendo al modelo
     que diga lo mismo con menos. Devuelve cuántas cues se condensaron.
 
-    Se hace en un único batch (los infractores suelen ser minoría), con
-    el presupuesto concreto de cada cue en el prompt. No toca cues
-    [ERROR] ni las que ya cumplen.
+    Va en grupos de _CONDENSAR_CHUNK con el presupuesto concreto de cada
+    cue en el prompt; cada grupo valida finish_reason y descarta la última
+    cue de una respuesta truncada. No toca cues [ERROR] ni las que cumplen.
     """
-    infractores = []
-    for idx, texto in translated_dict.items():
-        if texto.startswith("[ERROR]"):
-            continue
-        dur = durations.get(idx)
-        if not dur:
-            continue
-        budget = _char_budget(dur, cpl_limit)
-        if visible_chars(texto) > budget:
-            infractores.append((idx, texto, budget, dur))
-
+    infractores = _contar_violaciones(translated_dict, durations, cpl_limit)
     if not infractores:
         return 0
 
@@ -575,39 +607,70 @@ async def _condensar_violaciones(
     )
 
     lang_label = TARGET_LANGUAGES.get(target_lang, TARGET_LANGUAGES["es"])
-    lineas = [
+    instruccion = (
         f"Reescribe cada subtítulo en {lang_label} para que quepa en el "
         f"máximo de caracteres indicado entre corchetes, SIN perder el "
         f"sentido ni el tono. Es subtitulado: prioriza lo esencial, elimina "
-        f"relleno. Devuelve cada uno con su número y dos puntos.\n",
-    ]
-    for idx, texto, budget, _ in infractores:
-        plano = texto.replace("\n", " ")
-        lineas.append(f"{idx}: [≤{budget}] {plano}")
-    prompt = "\n".join(lineas)
-
-    try:
-        resp = await get_openai().chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=OPENAI_MAX_TOKENS,
-        )
-        condensadas = parsear_traducciones(resp.choices[0].message.content.strip())
-    except Exception as e:
-        logger.warning("Condensación falló (no bloqueante): %s", e)
-        return 0
+        f"relleno. Si un subtítulo tiene varias líneas que empiezan por "
+        f"guion, son hablantes distintos: consérvalos en líneas separadas. "
+        f"Devuelve cada uno con su número y dos puntos.\n"
+    )
 
     n = 0
-    idx_validos = {idx for idx, _, _, _ in infractores}
-    for idx, nuevo in condensadas.items():
-        if idx not in idx_validos or not nuevo.strip():
+    for start in range(0, len(infractores), _CONDENSAR_CHUNK):
+        grupo = infractores[start:start + _CONDENSAR_CHUNK]
+        lineas = [instruccion]
+        for idx, texto, budget in grupo:
+            # Los diálogos conservan sus saltos de línea: aplanarlos metía
+            # dos hablantes en la misma línea (eje del informe del revisor).
+            cuerpo = texto if _es_dialogo_multilinea(texto) else texto.replace("\n", " ")
+            lineas.append(f"{idx}: [≤{budget}] {cuerpo}")
+        prompt = "\n".join(lineas)
+
+        try:
+            resp = await get_openai().chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=OPENAI_MAX_TOKENS,
+            )
+        except Exception as e:
+            logger.warning("Condensación falló en un grupo (no bloqueante): %s", e)
             continue
-        # Solo se acepta si de verdad recorta (evita empeorar)
-        original = translated_dict[idx]
-        if visible_chars(nuevo) < visible_chars(original):
-            translated_dict[idx] = ajustar_cpl_optimo(nuevo, max_cpl=cpl_limit)
-            n += 1
+
+        condensadas = parsear_traducciones(resp.choices[0].message.content.strip())
+
+        # Respuesta truncada por max_tokens: la última cue parseada puede
+        # venir cortada a mitad de frase — y al ser más corta que el
+        # original pasaría el filtro de aceptación. Se descarta.
+        if resp.choices[0].finish_reason == "length" and condensadas:
+            descartada = list(condensadas)[-1]
+            condensadas.pop(descartada)
+            logger.warning(
+                "Condensación truncada por max_tokens: cue %d descartada",
+                descartada,
+            )
+            job_logs.log(
+                job_uuid,
+                f"⚠ Condensación truncada: cue {descartada} descartada por seguridad",
+                level="warn",
+            )
+
+        idx_validos = {idx for idx, _, _ in grupo}
+        for idx, nuevo in condensadas.items():
+            if idx not in idx_validos or not nuevo.strip():
+                continue
+            original = translated_dict[idx]
+            if _es_dialogo_multilinea(original):
+                nuevo = _repartir_dialogo(nuevo)
+                if not _es_dialogo_multilinea(nuevo):
+                    # No se pudo reconstruir el diálogo: mejor largo que
+                    # dos hablantes fusionados en una línea.
+                    continue
+            # Solo se acepta si de verdad recorta (evita empeorar)
+            if visible_chars(nuevo) < visible_chars(original):
+                translated_dict[idx] = ajustar_cpl_optimo(nuevo, max_cpl=cpl_limit)
+                n += 1
     return n
 
 
@@ -835,6 +898,7 @@ async def translate_texts(
     # presupuesto de caracteres. El revisor del piloto marcó el CPS >17
     # como problema técnico recurrente que el pipeline no controlaba.
     n_condensadas = 0
+    n_cps_violations = 0
     if durations:
         try:
             n_condensadas = await _condensar_violaciones(
@@ -842,14 +906,26 @@ async def translate_texts(
             )
         except Exception as e:
             logger.warning("Pasada de condensación falló (no bloqueante): %s", e)
+        # Re-verificación honesta: "condensado" no garantiza "dentro de
+        # presupuesto". El estudio necesita saber si el SRT cumple 17 CPS.
+        n_cps_violations = len(
+            _contar_violaciones(translated_dict, durations, cpl_limit)
+        )
+        if n_cps_violations:
+            job_logs.log(
+                job_uuid,
+                f"⚠ {n_cps_violations} cue(s) siguen por encima de "
+                f"{CPS_LIMIT:.0f} CPS tras la condensación",
+                level="warn",
+            )
 
     dt_total = time.time() - t_job_start
     n_failed = sum(1 for t in translated_dict.values() if t.startswith("[ERROR]"))
     logger.info(
         "── JOB COMPLETO ──  %.2fs · tokens total prompt=%d completion=%d · "
-        "cues fallidas=%d/%d · condensadas=%d",
+        "cues fallidas=%d/%d · condensadas=%d · violaciones CPS restantes=%d",
         dt_total, total_prompt_tokens, total_completion_tokens,
-        n_failed, len(items), n_condensadas,
+        n_failed, len(items), n_condensadas, n_cps_violations,
     )
     if n_failed:
         job_logs.log(
@@ -864,4 +940,5 @@ async def translate_texts(
         "tokens_completion": total_completion_tokens,
         "elapsed_s":         dt_total,
         "n_failed":          n_failed,
+        "n_cps_violations":  n_cps_violations,
     }
