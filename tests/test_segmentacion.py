@@ -83,3 +83,55 @@ def test_max_dos_lineas_siempre():
     largo = ("palabra " * 30).strip()
     out = ajustar_cpl_optimo(largo, max_cpl=38)
     assert len(_lineas(out)) <= 2
+
+
+# ── Fixes de la auditoría v3.7 (casos verificados ejecutando el código) ──
+
+def test_funcional_con_puntuacion_fuerte_no_veta_el_corte():
+    # "más." cierra oración: cortar ahí es el corte ideal, no un "más"
+    # colgando. Antes el -500 se aplicaba tras rstrip de la puntuación.
+    out = ajustar_cpl_optimo(
+        "No puedo más. Vámonos ya de una vez todos juntos.", max_cpl=38,
+    )
+    assert _lineas(out)[0] == "No puedo más."
+
+
+def test_funcional_con_interrogacion_no_veta_el_corte():
+    out = ajustar_cpl_optimo(
+        "Vienes con nosotros o no? Pues dime algo entonces.", max_cpl=38,
+    )
+    assert _lineas(out)[0] == "Vienes con nosotros o no?"
+
+
+def test_dialogo_con_guion_solo_en_segundo_hablante_es_intocable():
+    # Muchos SRT ingleses solo marcan al 2º hablante: fusionarlo mezcla
+    # dos hablantes en una línea (alteración semántica del diálogo).
+    dialogo = "Sí.\n-Pero entonces cuéntame qué pasó ayer por la noche en la fiesta."
+    assert ajustar_cpl_optimo(dialogo, max_cpl=38) == dialogo
+
+
+def test_tags_no_cuentan_para_el_cpl():
+    # 36 chars visibles: cabe en una línea aunque el len crudo sea 43
+    out = ajustar_cpl_optimo("<i>Cinema Paradiso</i> es una gran película", max_cpl=38)
+    assert len(_lineas(out)) == 1
+
+
+def test_tag_font_con_atributos_no_se_parte_por_dentro():
+    out = ajustar_cpl_optimo(
+        'Ella dijo que vendría <font color="red">mañana temprano</font> a casa',
+        max_cpl=38,
+    )
+    assert '<font color="red">' in out  # el tag sobrevive entero
+    assert len(_lineas(out)) == 2
+
+
+def test_no_separa_estar_del_gerundio():
+    out = ajustar_cpl_optimo(
+        "María y su hermana pequeña están esperando en la puerta.", max_cpl=38,
+    )
+    assert _sin_funcional_colgando(out)  # "están" no puede cerrar la línea 1
+
+
+def test_relativos_y_determinantes_en_lista():
+    for palabra in ("cuya", "quien", "cada", "ningún", "está", "fue"):
+        assert palabra in _NO_CORTAR_TRAS

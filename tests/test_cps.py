@@ -30,3 +30,13 @@ def test_visible_chars_ignora_saltos_y_tags():
 def test_visible_chars_cue_normal():
     # "¿Por unas palomitas y una chocolatina?" = 38 chars
     assert visible_chars("¿Por unas palomitas\ny una chocolatina?") == 38
+
+
+def test_visible_chars_no_se_traga_texto_entre_angulos():
+    # El regex genérico <[^>]+> borraba " < 10 y 20 > " (texto real) y la
+    # cue escapaba del control CPS. Solo se descuentan tags conocidos.
+    assert visible_chars("5 < 10 y 20 > 3") == len("5 < 10 y 20 > 3")
+
+
+def test_visible_chars_tag_font_con_atributos():
+    assert visible_chars('<font color="red">Hola</font>') == 4
