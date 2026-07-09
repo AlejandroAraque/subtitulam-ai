@@ -18,6 +18,10 @@ from app.services import (
 
 router = APIRouter()
 
+# Un SRT de largometraje ronda los 100 KB; 5 MB ya es anómalo. Sin tope,
+# un archivo gigante agotaba RAM y crédito OpenAI sin freno (SEC-02).
+_MAX_SRT_BYTES = 5 * 1024 * 1024
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # ROOT
@@ -46,15 +50,21 @@ async def translate_subtitle(
         raise HTTPException(status_code=400, detail="Sube un archivo .srt válido.")
 
     content = await file.read()
+    if len(content) > _MAX_SRT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="SRT demasiado grande (máx 5 MB). Un largometraje ronda los 100 KB.",
+        )
 
     try:
         text_content = content.decode("utf-8")
         original_subtitles = srt_service.parse_srt(text_content)
         cues_source = {s.index: s.content for s in original_subtitles}
         # Duración de cada cue en segundos: la usa el pipeline para la
-        # pasada de velocidad de lectura (CPS). Antes se descartaba.
+        # pasada de velocidad de lectura (CPS). Clamp a ≥0: un SRT con
+        # timecodes corruptos (end<start) daría presupuestos absurdos.
         cues_duration = {
-            s.index: (s.end - s.start).total_seconds()
+            s.index: max(0.0, (s.end - s.start).total_seconds())
             for s in original_subtitles
         }
         job_logs.log(
@@ -87,9 +97,11 @@ async def translate_subtitle(
         job_logs.log(job_uuid, f"💾 Job persistido en BBDD · id={job.id}")
 
         # ── 3. Traducir con RAG + sliding window + glosario activos ───────
+        from app.core.config import DEFAULT_CHUNK_SIZE
         try:
             result = await translation_service.translate_texts(
                 cues_source,
+                chunk_size=DEFAULT_CHUNK_SIZE,
                 target_lang=target_lang,
                 context=context,
                 cpl_limit=cpl,
@@ -178,6 +190,7 @@ async def translate_subtitle(
                 "X-Elapsed-Seconds":   f"{result['elapsed_s']:.2f}",
                 "X-Job-Id":            str(job.id),
                 "X-Failed-Cues":       str(n_failed),
+                "X-Cps-Violations":    str(result.get("n_cps_violations", 0)),
             },
         )
 
@@ -408,9 +421,19 @@ _VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".avi")
 _MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
 # Cancelación cooperativa del OCR: la UI marca el uuid y el callback de
-# progreso aborta en el siguiente frame. Un set simple basta (single-writer
-# por uuid; el GIL protege add/discard).
-_OCR_CANCELLED: set[str] = set()
+# progreso aborta en el siguiente frame. Dict uuid→timestamp con purga:
+# cancelar un uuid que no corre (o tarde) dejaba la entrada para siempre
+# (fuga lenta + cancelación fantasma si el uuid se reutilizara).
+_OCR_CANCELLED: dict[str, float] = {}
+_OCR_CANCEL_TTL_S = 3600.0
+
+
+def _purgar_cancelaciones_ocr() -> None:
+    import time as _time
+    ahora = _time.monotonic()
+    caducados = [u for u, t in _OCR_CANCELLED.items() if ahora - t > _OCR_CANCEL_TTL_S]
+    for uuid in caducados:
+        _OCR_CANCELLED.pop(uuid, None)
 
 
 class _OcrCancelled(Exception):
@@ -424,7 +447,9 @@ def ocr_cancel(job_uuid: str):
     El corte ocurre al terminar el frame en curso (~1-10 s después),
     no instantáneamente: el OCR de un frame no es interrumpible.
     """
-    _OCR_CANCELLED.add(job_uuid)
+    import time as _time
+    _purgar_cancelaciones_ocr()
+    _OCR_CANCELLED[job_uuid] = _time.monotonic()
     job_logs.log(job_uuid, "✖ Cancelación solicitada…", level="warn")
     return {"cancelling": True}
 
@@ -460,19 +485,30 @@ def ocr_detect(
             detail=f"Formato no soportado. Acepta: {', '.join(_VIDEO_EXTENSIONS)}",
         )
 
-    content = file.file.read()
-    if len(content) > _MAX_VIDEO_BYTES:
-        raise HTTPException(status_code=413, detail="Vídeo demasiado grande (máx 2 GB).")
-
-    job_logs.log(job_uuid, f"📥 Vídeo recibido · {len(content) / 1024 / 1024:.1f} MB")
+    _purgar_cancelaciones_ocr()
 
     tmp_path = None
     try:
+        # Copia por streaming con tope: file.file.read() completo traía
+        # hasta 2 GB a RAM por request (y el archivo ENTERO antes del 413)
+        # en el mismo contenedor que carga EasyOCR/torch — OOM esperando.
+        bytes_total = 0
         with tempfile.NamedTemporaryFile(suffix=_Path(file.filename).suffix,
                                          delete=False) as tmp:
-            tmp.write(content)
             tmp_path = tmp.name
-        del content  # liberar la copia en RAM cuanto antes
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_total += len(chunk)
+                if bytes_total > _MAX_VIDEO_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Vídeo demasiado grande (máx 2 GB).",
+                    )
+                tmp.write(chunk)
+
+        job_logs.log(job_uuid, f"📥 Vídeo recibido · {bytes_total / 1024 / 1024:.1f} MB")
 
         job_logs.log(job_uuid, f"🎞 Extrayendo frames (1 cada {interval_s:.1f}s)…")
         frames = ocr_service.extract_frames(tmp_path, interval_s)
@@ -523,7 +559,7 @@ def ocr_detect(
         job_logs.log(job_uuid, f"✖ OCR falló: {e}", level="error")
         raise HTTPException(status_code=500, detail=f"Error en OCR: {str(e)[:200]}")
     finally:
-        _OCR_CANCELLED.discard(job_uuid)
+        _OCR_CANCELLED.pop(job_uuid, None)
         if tmp_path:
             try:
                 _Path(tmp_path).unlink()
