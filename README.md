@@ -331,7 +331,7 @@ datos sobreviven (git no los gestiona). A partir de ahí,
 `.\scripts\actualizar.ps1` para cada actualización.
 
 **Actualización automática + botón "Actualizar ahora" (recomendado para
-instalaciones de usuario final)**: un único script registra las dos
+instalaciones de usuario final)**: un único script registra las tres
 tareas programadas de Windows que lo hacen todo — ejecutarlo UNA vez
 como administrador, desde la carpeta del proyecto:
 
@@ -354,6 +354,35 @@ Qué queda instalado:
 Para un equipo siempre encendido se puede añadir además un disparador
 nocturno (`New-ScheduledTaskTrigger -Daily -At 03:00`) con
 `Register-ScheduledTask` sobre `scripts/actualizar.ps1`.
+
+### Backups
+
+Cada noche a las 03:30 (tarea `Subtitulam-Backup-Nocturno`, la registra
+`instalar_tareas.ps1`; si el equipo estaba apagado, corre al encenderlo)
+`scripts/backup.ps1` copia los tres datos críticos a
+`%USERPROFILE%\SubtitulamBackups\AAAA-MM-DD\`:
+
+- `sqlite/` — copia online consistente de `subtitulam.db` (jobs, glosario, TM).
+- `qdrant/` — snapshot completo del vector store (`.snapshot`).
+- `outputs/` — los SRT archivados.
+
+Retención de 30 días y resumen de cada ejecución en `backup.log`. Para
+volcar al NAS, cambiar el default de `$DestinoBase` en el script (o pasar
+`-DestinoBase "\\NAS\backups\subtitulam"` en el argumento de la tarea).
+
+**Verificar un restore** — abrir la copia del SQLite y contar jobs:
+
+```powershell
+docker cp .\sqlite\subtitulam-AAAAMMDD.db subtitulam-backend:/tmp/check.db
+docker exec subtitulam-backend python -c "import sqlite3; print(sqlite3.connect('/tmp/check.db').execute('SELECT COUNT(*) FROM jobs').fetchone()[0])"
+```
+
+Para restaurar de verdad: parar el stack, `docker cp` del `.db` a
+`subtitulam-backend:/app/data/subtitulam.db` y arrancar. El snapshot de
+Qdrant se restaura por colección vía API
+(`POST /collections/translations/snapshots/upload` con el archivo) o, para
+el storage completo, copiándolo al contenedor y arrancando `qdrant` con
+`--storage-snapshot /qdrant/snapshots/<archivo>.snapshot`.
 
 ### Reseteo de la base de datos
 
