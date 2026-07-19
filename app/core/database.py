@@ -60,13 +60,68 @@ def get_db():
         db.close()
 
 
+# ── Migración ligera ──────────────────────────────────────────────────────
+# create_all NO altera tablas existentes: cada columna nueva sobre una BBDD
+# de producción (la del piloto tiene datos irreemplazables) necesitaba un
+# ALTER manual dentro del volumen Docker. Este mini-migrador cubre el caso
+# aditivo (columnas nuevas) de forma idempotente. Si algún día hace falta
+# renombrar/borrar columnas o migrar a Postgres, el salto es Alembic.
+_JOB_COLUMNS_NUEVAS = {
+    # nombre → definición SQL (SQLite exige default constante en ADD COLUMN)
+    "job_uuid":       "VARCHAR(64) NOT NULL DEFAULT ''",
+    "auto_context":   "BOOLEAN NOT NULL DEFAULT 0",
+    "finished_at":    "DATETIME",
+    "failed_cues":    "INTEGER NOT NULL DEFAULT 0",
+    "cps_violations": "INTEGER NOT NULL DEFAULT 0",
+    "n_cues":         "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def _ensure_schema(target_engine=None) -> None:
+    """Añade a `jobs` las columnas que falten (ALTER TABLE aditivo).
+
+    OJO: pysqlite autocommitea DDL, así que los ALTER NO son atómicos
+    con el resto — si el proceso muere a mitad, las columnas quedan y el
+    'if col in anadidas' del arranque siguiente se saltaría el resto.
+    Por eso el backfill y el índice son INCONDICIONALES e idempotentes:
+    cuestan ~0 cuando no hay nada que hacer y se auto-reparan solos.
+    """
+    from sqlalchemy import text
+
+    with (target_engine or engine).begin() as conn:
+        existentes = {
+            row[1]  # (cid, name, type, notnull, default, pk)
+            for row in conn.execute(text("PRAGMA table_info(jobs)"))
+        }
+        if not existentes:
+            return  # tabla recién creada por create_all: ya está completa
+
+        for col, ddl in _JOB_COLUMNS_NUEVAS.items():
+            if col not in existentes:
+                conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}"))
+
+        # Backfill idempotente: solo toca completados con n_cues sin
+        # rellenar (jobs anteriores a la columna desnormalizada).
+        conn.execute(text(
+            "UPDATE jobs SET n_cues = ("
+            "  SELECT COUNT(*) FROM translations"
+            "  WHERE translations.job_id = jobs.id)"
+            " WHERE n_cues = 0 AND status = 'completed'"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_job_uuid ON jobs (job_uuid)"
+        ))
+
+
 # ── Inicializador ─────────────────────────────────────────────────────────
 def init_db() -> None:
     """
-    Crea todas las tablas que no existan. Idempotente — no destruye datos.
+    Crea todas las tablas que no existan e incorpora las columnas nuevas
+    a las existentes. Idempotente — no destruye datos.
     Se llamará desde el lifespan de FastAPI (main.py).
     """
     # Import local para evitar dependencia circular: schemas.py importa Base
     # desde aquí, y Base.metadata necesita conocer los modelos antes de crear.
     from app.models import schemas  # noqa: F401 — registra las tablas
     Base.metadata.create_all(bind=engine)
+    _ensure_schema()

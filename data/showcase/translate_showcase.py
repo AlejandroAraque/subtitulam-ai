@@ -115,13 +115,20 @@ async def main_async(args) -> int:
     db = None
     job = None
     if args.index:
+        import uuid as _uuid
         db = SessionLocal()
-        job = history_service.create_pending_job(
+        # status='running' a propósito: este script traduce FUERA de la
+        # cola del backend — si naciera 'queued', el worker lo tomaría,
+        # no encontraría su upload y lo marcaría failed compitiendo con
+        # el complete_job de aquí.
+        job = history_service.create_queued_job(
             db,
             filename=src_path.name,
             target_lang=args.target_lang,
             cpl=args.cpl,
             context=effective_context,
+            job_uuid=_uuid.uuid4().hex[:12],
+            status="running",
         )
         print(f"[2/4] Job {job.id} creado en SQLite (modo --index)")
     else:
@@ -163,7 +170,7 @@ async def main_async(args) -> int:
 
     # ── Si --index, completar el job (insertar Translations + status='completed') ─
     if args.index and db is not None and job is not None:
-        await history_service.complete_job(
+        history_service.complete_job(
             db,
             job=job,
             cues_source=texts_dict,

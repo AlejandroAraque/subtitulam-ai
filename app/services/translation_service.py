@@ -1,7 +1,7 @@
 import logging
 import re
 import time
-from typing import Dict
+from typing import Callable, Dict
 
 from app.core import job_logs
 from app.core.config import OPENAI_MAX_TOKENS, OPENAI_MODEL, OPENAI_TEMPERATURE
@@ -11,6 +11,11 @@ from app.utils.text_utils import (
     ajustar_cpl_optimo,
     visible_chars,
 )
+
+
+class TranslationCancelled(Exception):
+    """El usuario canceló el job: se aborta entre chunks (el request a
+    OpenAI en curso no es interrumpible, pero no se lanza el siguiente)."""
 
 # Velocidad de lectura máxima (caracteres por segundo). UNE 153010 / Netflix
 # se mueven en 15-17; usamos 17 como techo, señalado por el revisor del piloto.
@@ -691,6 +696,7 @@ async def translate_texts(
     rag_max_examples: int = 5,
     glossary: list[dict] | None = None,
     job_uuid: str = "",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """
     Recibe {index: "texto original"} y devuelve un dict con:
@@ -732,6 +738,12 @@ async def translate_texts(
     )
 
     for i in range(0, len(items), chunk_size):
+        # Cancelación cooperativa: se comprueba entre chunks (el punto
+        # seguro; un chunk en vuelo no se puede cortar sin perder dinero).
+        if cancel_check and cancel_check():
+            job_logs.log(job_uuid, "✖ Traducción cancelada por el usuario", level="warn")
+            raise TranslationCancelled()
+
         bloque = items[i:i + chunk_size]
         batch_label = f"batch {bloque[0][0]}-{bloque[-1][0]}"
         chunk_idx = i // chunk_size + 1
@@ -897,6 +909,10 @@ async def translate_texts(
     # Con las duraciones disponibles, condensa las cues que superan su
     # presupuesto de caracteres. El revisor del piloto marcó el CPS >17
     # como problema técnico recurrente que el pipeline no controlaba.
+    if cancel_check and cancel_check():
+        job_logs.log(job_uuid, "✖ Traducción cancelada por el usuario", level="warn")
+        raise TranslationCancelled()
+
     n_condensadas = 0
     n_cps_violations = 0
     if durations:

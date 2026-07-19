@@ -9,11 +9,9 @@ from sqlalchemy.orm import Session
 from app.core import job_logs
 from app.core.database import get_db
 from app.services import (
-    context_service,
     glossary_service,
     history_service,
     srt_service,
-    translation_service,
 )
 
 router = APIRouter()
@@ -33,10 +31,15 @@ def root():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# TRANSLATE — ahora persiste cada job + sus traducciones en SQLite
+# TRANSLATE — patrón 202+polling (v3.8): valida, encola y responde en <1 s.
+# El trabajo real lo hace el worker del backend (app/services/job_runner.py);
+# la UI sigue el progreso con GET /jobs/by-uuids + logs y descarga el
+# resultado de GET /jobs/{id}/download cuando status=completed.
 # ══════════════════════════════════════════════════════════════════════════
-@router.post("/translate")
-async def translate_subtitle(
+@router.post("/translate", status_code=202)
+def translate_subtitle(
+    # `def` a propósito: FastAPI lo ejecuta en el threadpool, así el
+    # write_text + parse + commit no tocan el event loop del polling.
     file: UploadFile = File(...),
     context: str = Form(""),
     target_lang: str = Form("es"),
@@ -45,159 +48,82 @@ async def translate_subtitle(
     job_uuid: str = Form(""),  # uuid del frontend para logs en vivo (opcional)
     db: Session = Depends(get_db),
 ):
-    """Traduce un .srt con RAG + sliding window, persiste el job y sus cues."""
+    """Valida el .srt, lo guarda en data/uploads y crea un Job 'queued'."""
+    import uuid as _uuid
+
     if not file.filename.endswith(".srt"):
         raise HTTPException(status_code=400, detail="Sube un archivo .srt válido.")
+    if not (30 <= cpl <= 50):
+        raise HTTPException(status_code=400, detail="cpl fuera de rango (30-50).")
 
-    content = await file.read()
+    content = file.file.read()
     if len(content) > _MAX_SRT_BYTES:
         raise HTTPException(
             status_code=413,
             detail="SRT demasiado grande (máx 5 MB). Un largometraje ronda los 100 KB.",
         )
 
+    # Validar ANTES de encolar: un SRT corrupto debe fallar aquí con un
+    # mensaje claro, no minutos después dentro del worker.
     try:
-        text_content = content.decode("utf-8")
-        original_subtitles = srt_service.parse_srt(text_content)
-        cues_source = {s.index: s.content for s in original_subtitles}
-        # Duración de cada cue en segundos: la usa el pipeline para la
-        # pasada de velocidad de lectura (CPS). Clamp a ≥0: un SRT con
-        # timecodes corruptos (end<start) daría presupuestos absurdos.
-        cues_duration = {
-            s.index: max(0.0, (s.end - s.start).total_seconds())
-            for s in original_subtitles
-        }
-        job_logs.log(
-            job_uuid,
-            f"📥 SRT recibido · {len(content) / 1024:.1f} KB · "
-            f"{len(cues_source)} cues · cpl={cpl} · {target_lang}",
+        text_content = content.decode("utf-8-sig")  # tolera BOM
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="El SRT no está en UTF-8. Guárdalo como UTF-8 y vuelve a subirlo.",
+        )
+    try:
+        # Normalizado: índices None o duplicados colapsaban el dict del
+        # pipeline (traducciones cruzadas) o reventaban al persistir.
+        subtitulos = srt_service.parse_srt_normalizado(text_content)
+    except Exception:
+        raise HTTPException(status_code=400, detail="El archivo no es un SRT válido.")
+    n_cues = len(subtitulos)
+    if n_cues == 0:
+        raise HTTPException(status_code=400, detail="El SRT no contiene subtítulos.")
+
+    job_uuid = (job_uuid or "").strip() or _uuid.uuid4().hex[:12]
+
+    # Un uuid con job vivo no puede reutilizarse: dos jobs compartirían
+    # el mismo archivo de uploads y la cancelación sería ambigua.
+    existente = history_service.get_job_by_uuid(db, job_uuid)
+    if existente is not None and existente.status in ("queued", "running"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ya hay un job activo con ese uuid (id={existente.id}).",
         )
 
-        # ── 0. Auto-context (opt-in, solo si el usuario no escribió contexto)
-        if auto_context and not context.strip():
-            job_logs.log(job_uuid, "🧠 Auto-context: generando contexto a partir del título…")
-            context = await context_service.generate_context_from_title(file.filename)
-            job_logs.log(job_uuid, f"🧠 Auto-context listo ({len(context)} caracteres)")
-
-        # ── 1. Cargar glosario actual (reglas obligatorias en el prompt) ──
-        glossary_terms = [t.to_dict() for t in glossary_service.list_terms(db)]
-        job_logs.log(
-            job_uuid,
-            f"📚 Glosario cargado · {len(glossary_terms)} términos inyectados en el prompt",
+    from app.services.job_runner import upload_path
+    try:
+        upload_path(job_uuid).write_text(
+            srt_service.compose_srt(subtitulos), encoding="utf-8",
         )
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"No se pudo guardar el SRT: {e}")
 
-        # ── 2. Crear Job pendiente — necesitamos job.id para indexar batch ─
-        job = history_service.create_pending_job(
-            db,
-            filename=file.filename,
-            target_lang=target_lang,
-            cpl=cpl,
-            context=context,
-        )
-        job_logs.log(job_uuid, f"💾 Job persistido en BBDD · id={job.id}")
+    job = history_service.create_queued_job(
+        db,
+        filename=file.filename,
+        target_lang=target_lang,
+        cpl=cpl,
+        context=context,
+        job_uuid=job_uuid,
+        auto_context=auto_context,
+        n_cues=n_cues,
+    )
+    posicion = len(history_service.list_active_jobs(db))
+    job_logs.log(
+        job_uuid,
+        f"📥 Encolado · {len(content) / 1024:.1f} KB · {n_cues} cues · "
+        f"cpl={cpl} · {target_lang} · posición {posicion}",
+    )
 
-        # ── 3. Traducir con RAG + sliding window + glosario activos ───────
-        from app.core.config import DEFAULT_CHUNK_SIZE
-        try:
-            result = await translation_service.translate_texts(
-                cues_source,
-                chunk_size=DEFAULT_CHUNK_SIZE,
-                target_lang=target_lang,
-                context=context,
-                cpl_limit=cpl,
-                durations=cues_duration,
-                job_id=job.id,
-                filename=file.filename,
-                use_rag=True,
-                sliding_window_size=20,
-                glossary=glossary_terms,
-                job_uuid=job_uuid,
-            )
-        except Exception as e:
-            job_logs.log(job_uuid, f"✖ Error en traducción: {str(e)[:200]}", level="error")
-            history_service.fail_job(db, job, str(e))
-            raise
-
-        cues_target = result["translations"]
-
-        # ── 3a. Política ante cues fallidas (antes: fallo 100% silencioso) ─
-        # Si falló más del 20% del archivo (típico: API key inválida, 429
-        # en cascada), el job NO es un resultado utilizable: failed + 502.
-        # Con fallos parciales seguimos, pero avisando vía X-Failed-Cues.
-        n_failed = result.get("n_failed", 0)
-        n_cues = max(1, len(cues_source))
-        if n_failed / n_cues > 0.20:
-            msg = (f"Traducción fallida: {n_failed}/{n_cues} cues con error "
-                   f"(¿API key inválida o rate limit sostenido?)")
-            history_service.fail_job(db, job, msg)
-            job_logs.log(job_uuid, f"✖ {msg}", level="error")
-            raise HTTPException(status_code=502, detail=msg)
-
-        # ── 3b. Reconstruir el SRT respetando timecodes originales ────────
-        final_texts = [cues_target.get(s.index, s.content) for s in original_subtitles]
-        final_srt_content = srt_service.rebuild_srt(original_subtitles, final_texts)
-
-        # ── 4. Calcular CPL compliance real ───────────────────────────────
-        all_lines = []
-        for txt in cues_target.values():
-            all_lines.extend([ln for ln in txt.split("\n") if ln.strip()])
-        n_total = max(1, len(all_lines))
-        n_under = sum(1 for ln in all_lines if len(ln) <= cpl)
-        cpl_compliance = round(n_under / n_total * 100, 1)
-
-        # ── 5. Completar el Job (insertar Translations, status='completed') ─
-        await history_service.complete_job(
-            db,
-            job=job,
-            cues_source=cues_source,
-            cues_target=cues_target,
-            elapsed_s=result["elapsed_s"],
-            cpl_compliance=cpl_compliance,
-            tokens_prompt=result["tokens_prompt"],
-            tokens_completion=result["tokens_completion"],
-        )
-        job_logs.log(
-            job_uuid,
-            f"✅ Job completado · {result['elapsed_s']:.1f}s · "
-            f"CPL compliance {cpl_compliance}% · "
-            f"tokens prompt={result['tokens_prompt']} completion={result['tokens_completion']}",
-        )
-
-        # ── 6. Persistir el SRT final a disco para re-descargas ───────────
-        # Sin esto, el resultado solo existía en la respuesta HTTP: si el
-        # usuario cerraba el navegador sin descargar, el trabajo (pagado)
-        # quedaba inaccesible. La tabla Translation no guarda timecodes,
-        # así que el archivo es la única forma barata de reconstruirlo.
-        try:
-            from app.core.config import DATA_DIR
-            outputs_dir = DATA_DIR / "outputs"
-            outputs_dir.mkdir(exist_ok=True)
-            (outputs_dir / f"job_{job.id}.srt").write_text(
-                final_srt_content, encoding="utf-8",
-            )
-        except OSError as e:
-            # No bloqueante: la respuesta HTTP sigue llevando el SRT.
-            job_logs.log(job_uuid, f"⚠ No se pudo archivar el SRT: {e}", level="warn")
-
-        return Response(
-            content=final_srt_content,
-            media_type="text/plain",
-            headers={
-                "Content-Disposition": f"attachment; filename=traducido_{file.filename}",
-                "X-Cpl-Compliance":    str(cpl_compliance),
-                "X-Tokens-Prompt":     str(result["tokens_prompt"]),
-                "X-Tokens-Completion": str(result["tokens_completion"]),
-                "X-Elapsed-Seconds":   f"{result['elapsed_s']:.2f}",
-                "X-Job-Id":            str(job.id),
-                "X-Failed-Cues":       str(n_failed),
-                "X-Cps-Violations":    str(result.get("n_cps_violations", 0)),
-            },
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en el servidor: {str(e)}")
+    return {
+        "job_id":   job.id,
+        "job_uuid": job_uuid,
+        "status":   "queued",
+        "position": posicion,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -323,6 +249,54 @@ def list_jobs(limit: int = 50, db: Session = Depends(get_db)):
     return [j.to_dict() for j in history_service.list_jobs(db, limit=limit)]
 
 
+# NOTA de orden: estas rutas de 2 segmentos deben declararse ANTES de
+# /jobs/{job_id} — si no, "active" o "by-uuids" intentarían parsearse
+# como int y devolverían 422.
+@router.get("/jobs/active")
+def list_active_jobs(db: Session = Depends(get_db)):
+    """Jobs vivos (queued/running) de TODO el backend. La UI los pinta
+    aunque la sesión del navegador sea nueva: la cola sobrevive a un F5."""
+    return {"jobs": [j.to_dict() for j in history_service.list_active_jobs(db)]}
+
+
+@router.get("/jobs/by-uuids")
+def get_jobs_by_uuids(uuids: str = "", db: Session = Depends(get_db)):
+    """Snapshot de varios jobs por uuid (separados por coma) en una sola
+    query — es el polling de la cola de la UI, cada 2,5 s."""
+    lista = [u.strip() for u in uuids.split(",") if u.strip()][:100]
+    return {"jobs": [j.to_dict() for j in history_service.get_jobs_by_uuids(db, lista)]}
+
+
+@router.post("/jobs/by-uuid/{job_uuid}/cancel", status_code=202)
+def cancel_job_endpoint(job_uuid: str, db: Session = Depends(get_db)):
+    """Cancela un job por uuid.
+
+    - 'queued': se marca cancelled directamente (no llegará al worker).
+    - 'running': se marca para cancelación cooperativa — el worker corta
+      al terminar el chunk en curso (el request a OpenAI en vuelo no es
+      interrumpible; ese coste ya está gastado).
+    - terminal: no-op informativo.
+    """
+    from app.services.job_runner import mark_cancel
+
+    job = history_service.get_job_by_uuid(db, job_uuid)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+
+    if job.status == "queued":
+        # Marcar también el registro: si el worker lo toma justo ahora
+        # (carrera queued→running), verá la marca y lo descartará.
+        mark_cancel(job_uuid)
+        history_service.mark_cancelled(db, job)
+        job_logs.log(job_uuid, "✖ Quitado de la cola antes de empezar", level="warn")
+        return {"status": "cancelled", "was": "queued"}
+    if job.status == "running":
+        mark_cancel(job_uuid)
+        job_logs.log(job_uuid, "✖ Cancelación solicitada — se corta al final del chunk en curso…", level="warn")
+        return {"status": "cancelling", "was": "running"}
+    return {"status": job.status, "was": job.status}
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: int, db: Session = Depends(get_db)):
     job = history_service.get_job(db, job_id)
@@ -336,6 +310,14 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/jobs/{job_id}", status_code=204)
 def delete_job(job_id: int, db: Session = Depends(get_db)):
+    # Un job vivo no se borra: el worker seguiría gastando OpenAI sobre
+    # una fila inexistente y el commit final reventaría (StaleDataError).
+    job = history_service.get_job(db, job_id)
+    if job is not None and job.status in ("queued", "running"):
+        raise HTTPException(
+            status_code=409,
+            detail="El job está en cola o en curso: cancélalo antes de borrarlo.",
+        )
     if not history_service.delete_job(db, job_id):
         raise HTTPException(status_code=404, detail="Job no encontrado.")
     # Borrar también el SRT archivado (si existe)
