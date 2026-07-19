@@ -1,6 +1,6 @@
 [project]
 name = "ai-subtitle-translator"
-version = "3.7.0"
+version = "3.8.0"
 description = "Subtitulam — traducción asistida de subtítulos con GPT-4o, RAG (Qdrant), glosario activo y OCR de texto en frames"
 readme = "README.md"
 requires-python = ">=3.11"
