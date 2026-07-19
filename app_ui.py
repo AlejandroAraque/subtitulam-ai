@@ -106,12 +106,14 @@ def api_delete_glossary(term_id: int) -> bool:
         return False
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=15)
 def api_get_jobs() -> list[dict]:
     """Lista los jobs (historial) más recientes primero.
 
-    Cacheada sin TTL — invalidar con api_get_jobs.clear() tras
-    POST /translate exitoso o DELETE /jobs.
+    ttl=15: con la cola en el backend (v3.8), los jobs cambian de estado
+    desde OTRO proceso — la invalidación manual de esta sesión ya no
+    basta. El coste es predecible: un GET local (~ms, sin N+1) como
+    mucho cada 15 s y solo al visitar el Historial.
     """
     try:
         r = requests.get(f"{BACKEND_URL}/jobs", timeout=10)
@@ -131,16 +133,21 @@ def api_delete_job(job_id: int) -> bool:
 
 
 @st.cache_data(show_spinner=False)
+def _fetch_job_srt_cached(job_id: int) -> bytes:
+    """SRT archivado de un job completado. Cacheado: es inmutable.
+    Lanza en fallo — las excepciones NO se cachean, así un backend caído
+    de forma transitoria no envenena la cache de todas las sesiones."""
+    r = requests.get(f"{BACKEND_URL}/jobs/{job_id}/download", timeout=10)
+    r.raise_for_status()
+    return r.content
+
+
 def _fetch_job_srt(job_id: int) -> bytes | None:
-    """SRT archivado de un job completado, o None si no está disponible
-    (jobs anteriores al archivado de resultados, o backend caído).
-    Cacheado: el archivo de un job completado es inmutable."""
+    """Wrapper tolerante: None si no disponible (job antiguo sin archivo
+    o backend caído), sin cachear el fallo."""
     try:
-        r = requests.get(f"{BACKEND_URL}/jobs/{job_id}/download", timeout=10)
-        if r.status_code == 200:
-            return r.content
-        return None
-    except requests.exceptions.RequestException:
+        return _fetch_job_srt_cached(job_id)
+    except Exception:
         return None
 
 
@@ -451,19 +458,14 @@ button[kind="headerNoPadding"]{
 # ═══════════════════════════════════════════════════════════════════════════
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════════════════
+# Solo las claves con lectores reales: las ws_* del flujo síncrono
+# antiguo (barra de progreso local, resultado en sesión) murieron con
+# la migración de la cola al backend (v3.8).
 _DEFAULTS: dict = {
     "page":            "workspace",
-    "ws_state":        "idle",       # idle | translating | success | error
-    "ws_progress":     0,
-    "ws_result_bytes": None,
-    "ws_result_name":  None,
-    "ws_error":        None,
-    "ws_metrics":      None,
     "context_global":  "",
     "cpl_limit":       DEFAULT_CPL,
     "target_lang":     "es",
-    "glossary":        [],
-    "history":         [],
 }
 for _k, _v in _DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -836,11 +838,6 @@ def metrics(items: list[tuple[str, str, bool]]):
     )
     st.markdown(f'<div class="mg">{boxes}</div>', unsafe_allow_html=True)
 
-def status_pill(kind: str) -> str:
-    label = {"ok": "Completado", "err": "Error", "warn": "Revisión",
-             "run": "En curso", "queued": "En cola"}.get(kind, kind)
-    return f'<span class="st-pill {kind}"><span class="dot"></span>{label}</span>'
-
 def progress_bar(pct: int, label: str):
     st.markdown(f"""
     <div class="prg">
@@ -859,258 +856,194 @@ def empty_state(icon: str, title: str, sub: str):
     """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BACKEND HOOK
+# COLA DE TRADUCCIÓN (v3.8 — vive en el BACKEND: patrón 202+polling)
 # ═══════════════════════════════════════════════════════════════════════════
-def _process_translation_raw(
-    srt_name: str,
-    srt_bytes: bytes,
-    context: str,
-    target_lang: str,
-    cpl_limit: int,
-    job_uuid: str = "",
-) -> dict:
-    """Versión "pura" de process_translation que recibe bytes en vez de un
-    file_uploader. Llamable desde un worker thread (no toca session_state).
+# Antes: dict en cache_resource + worker thread que mantenía un request HTTP
+# abierto hasta 3 h (frágil: un reinicio del frontend perdía la cola y dejaba
+# jobs zombis; dos sesiones se pisaban el estado). Ahora POST /translate
+# encola y responde en <1 s; el worker del BACKEND procesa uno a uno y la UI
+# hace polling ligero cada 2,5 s. Visible para el usuario: la cola sobrevive
+# a un F5 y a reinicios, el progreso es real (chunk actual/total) y cancelar
+# funciona de verdad (el backend corta entre chunks).
+import re as _re
+import threading  # lo usan el chequeo de updates y el worker OCR
+import uuid as _queue_uuid
 
-    Si se pasa `job_uuid`, el backend acumula logs por ese id y pueden
-    consultarse en vivo vía GET /jobs/by-uuid/{uuid}/logs.
-    """
-    # timeout=(connect, read): conectar debe ser inmediato (10 s); la
-    # respuesta tarda lo que tarde el job entero. Lección del piloto
-    # (2026-07-07): películas REALES de ~2h con ~2.000 cues tardan 30-60+
-    # min y el límite anterior de 1800s las mataba a los 30:00 exactos
-    # mientras el backend seguía traduciendo. 3h de margen hasta migrar
-    # al patrón 202+polling (ARQ-02), que es el arreglo de verdad.
-    response = requests.post(
+_QUEUE_STATUS_MAP = {
+    "queued":    "queued",
+    "running":   "translating",
+    "completed": "completed",
+    "failed":    "failed",
+    "cancelled": "cancelled",
+}
+
+
+def _my_job_uuids() -> list:
+    """uuids encolados por ESTA sesión de navegador. Los activos se
+    muestran globalmente (cola real del backend); esto solo decide qué
+    terminados se listan como 'de esta sesión'."""
+    if "my_job_uuids" not in st.session_state:
+        st.session_state.my_job_uuids = []
+    return st.session_state.my_job_uuids
+
+
+def enqueue_translation(srt_file, context: str, target_lang: str, cpl_limit: int) -> str:
+    """Encola un .srt en el backend. Devuelve el uuid del job.
+
+    Lanza excepción si el backend rechaza el archivo o no responde: el
+    caller la muestra al momento (antes un SRT corrupto fallaba minutos
+    después, ya dentro de la cola)."""
+    job_uuid = _queue_uuid.uuid4().hex[:12]
+    r = requests.post(
         f"{BACKEND_URL}/translate",
-        files={"file": (srt_name, srt_bytes, "text/plain")},
+        files={"file": (srt_file.name, srt_file.getvalue(), "text/plain")},
         data={
             "context":     context,
             "target_lang": target_lang,
             "cpl":         cpl_limit,
             "job_uuid":    job_uuid,
         },
-        timeout=(10, 10800),
+        timeout=(10, 30),  # encolar es instantáneo: sin timeouts de horas
     )
-    response.raise_for_status()
+    r.raise_for_status()
+    _my_job_uuids().append(job_uuid)
+    # Poda: la vista de sesión solo maneja los últimos 50; sin tope, una
+    # sesión de semanas acumulaba uuids y bytes de SRT sin límite.
+    st.session_state.my_job_uuids = st.session_state.my_job_uuids[-50:]
+    vivos = set(st.session_state.my_job_uuids)
+    cache = st.session_state.get("_q_result_cache", {})
+    for u in [u for u in cache if u not in vivos]:
+        cache.pop(u, None)
+    return job_uuid
 
-    translated_text = response.content.decode("utf-8", errors="ignore")
-    lines = [ln for ln in translated_text.splitlines()
-             if ln.strip() and "-->" not in ln and not ln.strip().isdigit()]
-    n_lines = len(lines)
-    n_over_cpl = sum(1 for ln in lines if len(ln) > cpl_limit)
-    cpl_rate = f"{(n_lines - n_over_cpl) / max(1, n_lines) * 100:.1f}%"
 
-    # Cues que el backend no pudo traducir (marcadas [ERROR] en el SRT).
-    # 0 en condiciones normales; >0 tras errores parciales (p. ej. 429).
+def _job_to_ui(j: dict) -> dict:
+    """Mapea el Job del backend al shape que renderiza la cola."""
+    done = j.get("status") == "completed"
+    return {
+        "id":           j.get("job_uuid") or str(j["id"]),
+        "backend_id":   j["id"],
+        "srt_name":     j.get("filename", "—"),
+        "status":       _QUEUE_STATUS_MAP.get(j.get("status"), j.get("status")),
+        "started_at":   j.get("started_at"),
+        "completed_at": j.get("finished_at"),
+        "error":        j.get("error") or "",
+        "failed_cues":  j.get("failed_cues", 0),
+        "target_lang":  j.get("target_lang", "es"),
+        "result_bytes": None,   # se rellena bajo demanda para completados
+        "result_name":  f"{j.get('target_lang', 'es')}_{j.get('filename', 'traducido.srt')}",
+        "metrics": {
+            "cpl_rate": f"{j.get('cpl_compliance', 0.0):.1f}%",
+            "lines":    str(j.get("n_translations", 0)),
+            "langs":    f"→ {j.get('target_lang', 'es').upper()}",
+        } if done else None,
+    }
+
+
+def _result_bytes_cached(backend_id: int, job_uuid: str):
+    """Descarga (una sola vez) el SRT final de un job completado y lo
+    cachea en la sesión — el autorefresh no debe re-descargar cada 2,5 s.
+
+    Los fallos también se acotan: 3 intentos y se rinde (el render
+    ofrece el Historial como vía) — sin tope, un backend caído se
+    reintentaba en cada tick bloqueando el render."""
+    cache = st.session_state.setdefault("_q_result_cache", {})
+    if job_uuid in cache:
+        return cache[job_uuid]
+    fails = st.session_state.setdefault("_q_result_fails", {})
+    if fails.get(job_uuid, 0) >= 3:
+        return None
     try:
-        failed_cues = int(response.headers.get("X-Failed-Cues", "0"))
-    except ValueError:
-        failed_cues = 0
-
-    return {
-        "bytes":       response.content,
-        "filename":    f"{target_lang}_{srt_name}",
-        "failed_cues": failed_cues,
-        "metrics":  {
-            "cpl_rate": cpl_rate,
-            "lines":    str(n_lines),
-            "langs":    f"EN → {target_lang.upper()}",
-        },
-    }
-
-
-def process_translation(srt_file, context: str, target_lang: str, cpl_limit: int) -> dict:
-    """Wrapper compatible con código antiguo: acepta un file_uploader."""
-    return _process_translation_raw(
-        srt_file.name, srt_file.getvalue(), context, target_lang, cpl_limit,
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# COLA DE TRADUCCIÓN (in-process, single-user, sin Redis)
-# ═══════════════════════════════════════════════════════════════════════════
-# Patrón: usar st.cache_resource para que el estado de la cola sobreviva
-# a los reruns de Streamlit (las variables de módulo se REINICIAN en cada
-# rerun, así que no sirven; cache_resource sí persiste).
-#
-# El worker thread puede mutar el dict cacheado libremente — Streamlit
-# garantiza que es el MISMO objeto entre reruns.
-#
-# Para migrar a Redis (multi-user, persistencia) en el futuro: sustituir
-# estas funciones por llamadas a arq/Celery. La UI del Workspace no
-# cambia — sigue llamando a enqueue_translation() y get_queue_snapshot().
-import threading
-import uuid as _queue_uuid
-
-
-@st.cache_resource
-def _get_queue_state() -> dict:
-    """Singleton del estado de cola. cache_resource sobrevive a reruns
-    y a navegación entre páginas. Es el MISMO objeto entre todas las
-    llamadas a esta función dentro del mismo proceso Streamlit.
-    """
-    return {
-        "lock":            threading.Lock(),
-        "pending":         [],     # jobs encolados, no empezados
-        "current":         None,   # job en proceso AHORA (o None)
-        "completed":       [],     # historial de la sesión
-        "cancelled_ids":   set(),  # ids de jobs que el usuario pidió cancelar
-        "worker_started":  False,
-    }
-
-
-def _translation_worker_loop() -> None:
-    """Loop infinito: drena la cola uno a uno. Vive en un daemon thread.
-
-    Lee el dict cacheado por cache_resource — es el mismo objeto que ve
-    el UI desde el thread principal.
-    """
-    state = _get_queue_state()
-    while True:
-        # Sacar el siguiente job, descartando los que ya estén cancelados
-        # antes de empezar (el usuario pulsó ✖ mientras estaban en cola).
-        with state["lock"]:
-            job = None
-            while state["pending"]:
-                candidate = state["pending"].pop(0)
-                if candidate["id"] in state["cancelled_ids"]:
-                    candidate["status"] = "cancelled"
-                    candidate["completed_at"] = datetime.utcnow().isoformat()
-                    state["completed"].append(candidate)
-                    state["cancelled_ids"].discard(candidate["id"])
-                    continue
-                job = candidate
-                job["status"] = "translating"
-                job["started_at"] = datetime.utcnow().isoformat()
-                state["current"] = job
-                break
-            if job is None:
-                state["current"] = None
-
-        if job is None:
-            time.sleep(1.0)
-            continue
-
-        try:
-            result = _process_translation_raw(
-                job["srt_name"],
-                job["srt_bytes"],
-                job["context"],
-                job["target_lang"],
-                job["cpl_limit"],
-                job_uuid=job["id"],  # logs en vivo: backend acumula por este uuid
-            )
-            with state["lock"]:
-                # Si el usuario pidió cancelar mientras se procesaba, NO se
-                # muestra como completed — se marca como cancelled.
-                # Limitación: el coste OpenAI del job actual ya está gastado.
-                if job["id"] in state["cancelled_ids"]:
-                    job["status"] = "cancelled"
-                    job["completed_at"] = datetime.utcnow().isoformat()
-                    state["cancelled_ids"].discard(job["id"])
-                else:
-                    job["status"] = "completed"
-                    job["completed_at"] = datetime.utcnow().isoformat()
-                    job["result_bytes"] = result["bytes"]
-                    job["result_name"]  = result["filename"]
-                    job["metrics"]      = result["metrics"]
-                    job["failed_cues"]  = result.get("failed_cues", 0)
-                state["completed"].append(job)
-                state["current"] = None
-        except Exception as e:
-            with state["lock"]:
-                # Si fue cancelado durante el request, prefiere la marca
-                # de cancelled sobre la de failed (suele ser cancel desde
-                # cliente lo que rompe la conexión).
-                if job["id"] in state["cancelled_ids"]:
-                    job["status"] = "cancelled"
-                    state["cancelled_ids"].discard(job["id"])
-                else:
-                    job["status"] = "failed"
-                    job["error"] = str(e)
-                job["completed_at"] = datetime.utcnow().isoformat()
-                state["completed"].append(job)
-                state["current"] = None
-
-
-def _ensure_worker() -> None:
-    """Arranca el worker una sola vez por proceso."""
-    state = _get_queue_state()
-    with state["lock"]:
-        if state["worker_started"]:
-            return
-        state["worker_started"] = True
-    t = threading.Thread(target=_translation_worker_loop, daemon=True)
-    t.start()
-
-
-def enqueue_translation(
-    srt_file,
-    context: str,
-    target_lang: str,
-    cpl_limit: int,
-) -> str:
-    """Encola un .srt para traducción. Devuelve el id del job."""
-    _ensure_worker()
-    state = _get_queue_state()
-    job_id = _queue_uuid.uuid4().hex[:8]
-    job = {
-        "id":          job_id,
-        "srt_name":    srt_file.name,
-        "srt_bytes":   srt_file.getvalue(),
-        "srt_size":    srt_file.size,
-        "context":     context,
-        "target_lang": target_lang,
-        "cpl_limit":   cpl_limit,
-        "status":      "queued",
-        "queued_at":   datetime.utcnow().isoformat(),
-        "started_at":  None,
-        "completed_at": None,
-        "result_bytes": None,
-        "result_name":  None,
-        "metrics":      None,
-        "error":        None,
-    }
-    with state["lock"]:
-        state["pending"].append(job)
-    return job_id
+        r = requests.get(
+            f"{BACKEND_URL}/jobs/{backend_id}/download", timeout=10,
+        )
+        r.raise_for_status()
+        cache[job_uuid] = r.content
+        fails.pop(job_uuid, None)
+        return cache[job_uuid]
+    except Exception:
+        fails[job_uuid] = fails.get(job_uuid, 0) + 1
+        return None
 
 
 def get_queue_snapshot() -> dict:
-    """Snapshot del estado de la cola para renderizar la UI."""
-    state = _get_queue_state()
-    with state["lock"]:
-        return {
-            "pending":   [_shallow_job(j) for j in state["pending"]],
-            "current":   _shallow_job(state["current"]) if state["current"] else None,
-            "completed": [_shallow_job(j) for j in state["completed"]],
-        }
+    """Snapshot de la cola desde el backend (1-2 GETs ligeros).
 
+    - Activos (queued/running): TODOS los del backend — un F5 o una
+      segunda pestaña ven la cola real, no una copia en memoria.
+    - Terminales: solo los de esta sesión (el resto vive en Historial).
+    """
+    mine = _my_job_uuids()
+    jobs: dict = {}
+    try:
+        r = requests.get(f"{BACKEND_URL}/jobs/active", timeout=5)
+        r.raise_for_status()
+        for j in r.json().get("jobs", []):
+            jobs[j.get("job_uuid") or str(j["id"])] = j
+        if mine:
+            r = requests.get(
+                f"{BACKEND_URL}/jobs/by-uuids",
+                params={"uuids": ",".join(mine[-50:])},
+                timeout=5,
+            )
+            r.raise_for_status()
+            for j in r.json().get("jobs", []):
+                jobs[j.get("job_uuid") or str(j["id"])] = j
+    except Exception:
+        return {"pending": [], "current": None, "completed": [], "offline": True}
 
-def _shallow_job(job: dict) -> dict:
-    """Copia ligera del job sin los bytes pesados."""
-    return {
-        k: v for k, v in job.items()
-        if k not in ("srt_bytes",)
-    }
-
-
-def get_completed_job(job_id: str) -> Optional[dict]:
-    """Devuelve un job completado por id (incluyendo result_bytes)."""
-    state = _get_queue_state()
-    with state["lock"]:
-        for j in state["completed"]:
-            if j["id"] == job_id:
-                return j
-    return None
+    pending, current, completed = [], None, []
+    for j in sorted(jobs.values(), key=lambda x: x["id"]):
+        ui = _job_to_ui(j)
+        if ui["status"] == "queued":
+            pending.append(ui)
+        elif ui["status"] == "translating":
+            current = ui
+        elif ui["id"] in mine:
+            if ui["status"] == "completed":
+                ui["result_bytes"] = _result_bytes_cached(ui["backend_id"], ui["id"])
+            completed.append(ui)
+    return {"pending": pending, "current": current, "completed": completed, "offline": False}
 
 
 def clear_completed_jobs() -> None:
-    """Borra el historial de la sesión actual. No afecta a SQLite."""
-    state = _get_queue_state()
-    with state["lock"]:
-        state["completed"].clear()
+    """Quita los terminados de la vista de esta sesión. No borra nada del
+    backend: siguen disponibles en el Historial."""
+    terminados = set()
+    try:
+        r = requests.get(
+            f"{BACKEND_URL}/jobs/by-uuids",
+            params={"uuids": ",".join(_my_job_uuids()[-50:])},
+            timeout=5,
+        )
+        for j in r.json().get("jobs", []):
+            if j.get("status") in ("completed", "failed", "cancelled"):
+                terminados.add(j.get("job_uuid"))
+    except Exception:
+        pass
+    st.session_state.my_job_uuids = [
+        u for u in _my_job_uuids() if u not in terminados
+    ]
+    st.session_state.pop("_q_result_cache", None)
+
+
+def cancel_job(job_id: str) -> str:
+    """Cancela un job por uuid contra el backend.
+
+    'queued' se quita de la cola; 'running' se corta al terminar el
+    chunk en curso (el request a OpenAI en vuelo ya está pagado)."""
+    try:
+        r = requests.post(
+            f"{BACKEND_URL}/jobs/by-uuid/{job_id}/cancel", timeout=5,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "queued":  "cancelled_pending",
+            "running": "cancelled_in_progress",
+        }.get(data.get("was", ""), "already_done")
+    except Exception:
+        return "not_found"
 
 
 def _fetch_job_logs(job_uuid: str, since: int = 0) -> list[dict]:
@@ -1134,41 +1067,6 @@ def _fetch_job_logs(job_uuid: str, since: int = 0) -> list[dict]:
     except Exception:
         return []
 
-
-def cancel_job(job_id: str) -> str:
-    """Pide cancelar un job (pendiente o en curso).
-
-    Comportamiento:
-      - Si el job está en `pending`: lo elimina antes de empezar.
-        El worker lo registra como cancelled en completed.
-      - Si el job está en curso (`current`): marca el id en
-        cancelled_ids. El worker NO puede cortar la llamada HTTP a
-        OpenAI en curso (limitación), pero al recibir el resultado
-        lo descarta y registra el job como cancelled en lugar de
-        completed. El coste OpenAI del job actual ya está consumido.
-      - Si el job no existe o ya está terminado: no-op.
-
-    Returns:
-        Status final esperado: 'cancelled_pending' / 'cancelled_in_progress'
-        / 'not_found' / 'already_done'.
-    """
-    state = _get_queue_state()
-    with state["lock"]:
-        # Pendiente: lo añadimos a cancelled_ids para que el worker lo
-        # descarte cuando lo saque de la cola.
-        for p in state["pending"]:
-            if p["id"] == job_id:
-                state["cancelled_ids"].add(job_id)
-                return "cancelled_pending"
-        # En curso: marcamos para que el worker descarte el resultado.
-        if state["current"] and state["current"]["id"] == job_id:
-            state["cancelled_ids"].add(job_id)
-            return "cancelled_in_progress"
-        # Completado o no encontrado
-        for c in state["completed"]:
-            if c["id"] == job_id:
-                return "already_done"
-        return "not_found"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CHEQUEO DE ACTUALIZACIÓN (en segundo plano, sin tocar la latencia de render)
@@ -1317,6 +1215,19 @@ def _render_translation_queue() -> bool:
     pending) — la UI usa este flag para auto-refrescar.
     """
     snap = get_queue_snapshot()
+
+    # Backend caído: la cola NO se pierde (vive en el backend); se avisa
+    # y se sigue refrescando para reconectar solo.
+    if snap.get("offline"):
+        if _my_job_uuids():
+            st.warning(
+                "Sin conexión con el motor. La cola está a salvo en el "
+                "backend y esta vista se reconectará sola.",
+                icon="⚠️",
+            )
+            return True  # seguir auto-refrescando para reconectar
+        return False
+
     has_activity = bool(snap["current"] or snap["pending"])
     has_any = has_activity or bool(snap["completed"])
 
@@ -1354,11 +1265,23 @@ def _render_translation_queue() -> bool:
                 elapsed_s = (datetime.utcnow() - t0).total_seconds()
             except Exception:
                 pass
-        # Estimación grosera del tiempo total esperado: 7 min para .srt típico.
-        # Se usa solo para la barra de progreso visual.
-        expected_s = max(60.0, min(900.0, elapsed_s * 1.5 + 60))
-        pct = int(min(95, elapsed_s / expected_s * 100))
         elapsed_str = f"{int(elapsed_s // 60)}:{int(elapsed_s % 60):02d}"
+
+        # Progreso REAL desde los logs del backend ("Chunk 12/84"). Si aún
+        # no hay chunks (arrancando), cae a la estimación temporal antigua.
+        logs = _fetch_job_logs(cur["id"], since=0)
+        pct = None
+        pct_label = "GPT-4o + RAG + glosario…"
+        for entry in reversed(logs):
+            m = _re.search(r"Chunk (\d+)/(\d+)", entry.get("message", ""))
+            if m:
+                done_c, total_c = int(m.group(1)), int(m.group(2))
+                pct = int(done_c / max(1, total_c) * 100)
+                pct_label = f"Chunk {done_c}/{total_c} · GPT-4o + RAG + glosario"
+                break
+        if pct is None:
+            expected_s = max(60.0, min(900.0, elapsed_s * 1.5 + 60))
+            pct = int(min(95, elapsed_s / expected_s * 100))
 
         info_col, cancel_col = st.columns([5, 0.6], gap="small")
         with info_col:
@@ -1371,7 +1294,7 @@ def _render_translation_queue() -> bool:
                 f'{elapsed_str}</span></div>',
                 unsafe_allow_html=True,
             )
-            progress_bar(pct, "GPT-4o + RAG + glosario…")
+            progress_bar(pct, pct_label)
         with cancel_col:
             st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
             if st.button(
@@ -1386,10 +1309,7 @@ def _render_translation_queue() -> bool:
                 st.rerun()
 
         # LOGS EN VIVO ────────────────────────────────────────────────
-        # Polling cada rerun (autorefresh) al backend. No paginamos por
-        # `since` aún — pedimos los últimos N porque MAX_LINES_PER_JOB ya
-        # tope la lista server-side. Simple y robusto.
-        logs = _fetch_job_logs(cur["id"], since=0)
+        # (obtenidos arriba, reutilizados por la barra de progreso real)
         with st.expander(
             f"📜 Logs en vivo · {len(logs)} eventos",
             expanded=bool(logs),
@@ -1519,6 +1439,15 @@ def _render_translation_queue() -> bool:
                             use_container_width=True,
                             key=f"qdl_{c['id']}",
                         )
+                    else:
+                        # Descarga directa no disponible (fallo transitorio
+                        # agotado): el archivo sigue en el backend.
+                        st.markdown(
+                            '<div style="font-size:11px;color:var(--text-4);'
+                            'margin-top:10px;text-align:center;">Descárgalo '
+                            'en Historial</div>',
+                            unsafe_allow_html=True,
+                        )
                 with colPV:
                     # Sin botón "Preview" falso: Streamlit no permite
                     # pre-cargar un file_uploader, así que un botón que solo
@@ -1586,11 +1515,15 @@ def render_workspace():
     col_srt, col_mp4 = st.columns(2, gap="medium")
     with col_srt:
         st.markdown('<div style="font-size:12.5px;font-weight:500;color:var(--text-2);margin-bottom:6px;">Subtítulos .srt <span style="color:#ef4444;">*</span> <em style="color:var(--text-4);font-style:normal;">(uno o varios)</em></div>', unsafe_allow_html=True)
+        # Key rotatoria: Streamlit no vacía el uploader tras encolar; sin
+        # rotarla, un segundo click re-POSTeaba TODOS los archivos
+        # (jobs duplicados = 30-60 min de cola y ~1 € cada uno).
+        st.session_state.setdefault("srt_up_gen", 0)
         srt_files = st.file_uploader(
             "srt",
             type=["srt"],
             label_visibility="collapsed",
-            key="srt_up",
+            key=f"srt_up_{st.session_state.srt_up_gen}",
             accept_multiple_files=True,
         )
         if srt_files:
@@ -1630,21 +1563,45 @@ def render_workspace():
         use_container_width=True,
     )
 
+    # Mensajes de rechazo del encolado anterior (sobreviven al rerun)
+    for msg in st.session_state.pop("_enqueue_errors", []):
+        st.error(msg, icon="🚫")
+
     if clicked and srt_files:
+        encolados, rechazados = 0, []
         for f in srt_files:
-            enqueue_translation(
-                f,
-                st.session_state.context_global,
-                st.session_state.target_lang,
-                st.session_state.cpl_limit,
-            )
-        st.toast(
-            f"Encolado(s) {len(srt_files)} archivo(s) en cola.",
-            icon="✅",
-        )
+            try:
+                enqueue_translation(
+                    f,
+                    st.session_state.context_global,
+                    st.session_state.target_lang,
+                    st.session_state.cpl_limit,
+                )
+                encolados += 1
+            except requests.HTTPError as e:
+                # El backend valida ANTES de encolar (SRT corrupto, no
+                # UTF-8, >5MB…): mostrar su mensaje, no un traceback.
+                try:
+                    detalle = e.response.json().get("detail", str(e))
+                except Exception:
+                    detalle = str(e)
+                rechazados.append(f"**{f.name}**: {detalle}")
+            except Exception:
+                rechazados.append(
+                    f"**{f.name}**: sin conexión con el motor "
+                    f"(¿backend arrancando?). Vuelve a intentarlo."
+                )
         # Invalidar cache de jobs para que aparezcan en el historial cuando
         # el backend los persista
         api_get_jobs.clear()
+        # Rerun SIEMPRE, con el uploader rotado: dejar los archivos en el
+        # uploader tras encolar invitaba al doble click (jobs duplicados).
+        # Los errores se muestran tras el rerun (session_state) y la cola
+        # recién encolada aparece con su autorefresh.
+        st.session_state.srt_up_gen += 1
+        st.session_state._enqueue_errors = rechazados
+        if encolados:
+            st.toast(f"Encolado(s) {encolados} archivo(s) en cola.", icon="✅")
         st.rerun()
 
     # Auto-refresh vía streamlit-autorefresh (componente JS, no bloquea
@@ -1950,12 +1907,23 @@ def _dialog_confirm_clear_history(jobs: list[dict]):
             st.rerun()
     with col_si:
         if st.button("Sí, borrar todo", type="primary", use_container_width=True):
+            # Los jobs vivos NO se borran (el backend además lo rechaza
+            # con 409): borrar la fila de una película en curso dejaría
+            # al worker gastando OpenAI sobre un job inexistente.
+            activos = 0
             for j in jobs:
+                if j.get("status") in ("queued", "running"):
+                    activos += 1
+                    continue
                 api_delete_job(j["id"])
             api_get_jobs.clear()
-            st.session_state.ws_state = "idle"
-            st.session_state.ws_result_bytes = None
-            st.toast("Historial vaciado.", icon="🗑")
+            if activos:
+                st.toast(
+                    f"Historial vaciado ({activos} en curso conservados).",
+                    icon="🗑",
+                )
+            else:
+                st.toast("Historial vaciado.", icon="🗑")
             st.rerun()
 
 
@@ -1965,10 +1933,14 @@ def render_historial():
     n     = len(jobs)
     n_ok  = sum(1 for j in jobs if j.get("status") == "completed")
     n_err = sum(1 for j in jobs if j.get("status") == "failed")
+    n_act = sum(1 for j in jobs if j.get("status") in ("queued", "running"))
 
+    resumen = f"{n} proyectos · {n_ok} completados · {n_err} con error"
+    if n_act:
+        resumen += f" · {n_act} en curso/cola"
     page_header(
         "Historial de Proyectos",
-        f"{n} proyectos · {n_ok} completados · {n_err} con error"
+        resumen
         if n else "Las traducciones completadas aparecerán aquí automáticamente.",
     )
 
@@ -1991,13 +1963,22 @@ def render_historial():
         s = j.get("elapsed_s", 0.0)
         duracion = f"{int(s)//60}m {int(s)%60:02d}s" if s >= 60 else f"{s:.1f}s"
 
-        # Estado legible con icono
+        # Estado legible con icono (desde v3.8 el Historial también ve
+        # jobs vivos: la cola es persistente en el backend)
+        estado = j.get("status")
         status_label = {
             "completed": "✓ Completado",
             "failed":    "✕ Error",
-        }.get(j.get("status"), j.get("status", "—"))
+            "queued":    "⏳ En cola",
+            "running":   "🔄 En curso",
+            "cancelled": "✖ Cancelado",
+        }.get(estado, estado or "—")
 
         coste = _job_cost_eur(j.get("tokens_prompt"), j.get("tokens_completion"))
+
+        # Métricas solo cuando existen: un job en cola con "% CPL 0.0"
+        # y "0.0s" parece un dato real, no una ausencia.
+        terminado = estado == "completed"
 
         # Sin scroll horizontal: columnas compactas y anchos explícitos.
         # "CPL" (config casi constante) queda fuera; "Idiomas" se mantiene
@@ -2005,11 +1986,11 @@ def render_historial():
         rows.append({
             "ID":       f"JOB-{j['id']:05d}",
             "Archivo":  j.get("filename", "—"),
-            "Idiomas":  f"EN → {j.get('target_lang', 'es').upper()}",
-            "Líneas":   j.get("n_translations", 0),
-            "% CPL":    j.get("cpl_compliance", 0.0),
+            "Idiomas":  f"→ {j.get('target_lang', 'es').upper()}",
+            "Líneas":   j.get("n_translations", 0) or None,
+            "% CPL":    j.get("cpl_compliance", 0.0) if terminado else None,
             "Coste":    coste,
-            "Duración": duracion,
+            "Duración": duracion if terminado else None,
             "Fecha":    fecha,
             "Estado":   status_label,
         })
